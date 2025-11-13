@@ -1,0 +1,903 @@
+/////////////////////////////////////////////////////////////////////
+/*!
+   \file vad.h
+   \brief Estimación de actividad vocal
+
+	Copyright: 2010 - Grupo de Voz (DAET) ETSII/IT-Bilbao
+	\author Iker Luengo
+	\version 1.0.0
+	\date 04/03/10
+
+	\if SKIP
+	Version  dd/mm/aa  Autor     Proposito de la edicion
+	-------  --------  --------  -----------------------
+	1.0.0    04/03/10  ikerl     Codificación inicial
+	\endif
+*/
+
+
+
+
+#include <stdio.h>
+#include <cassert>
+#include "xfft.h"
+#include "uti.h"
+#include "xalloc.h"
+
+
+
+/*!
+
+	\section description Descripción
+	
+	Este programa implementa un algoritmo VAD basado en el cálculo de LTSD (Long
+	Term Spectrum Deviation). La salida del programa es un archivo de marcas,
+	con el mismo nombre que el archivo de sonido original. Cada marca determina un
+	intervalo de voz (etiqueta 'V') o de silencio (etiqueta '_').
+
+	El sistema realiza una estimación del espectro de las tramas silenciosas (es decir,
+	el espectro del ruido), y lo compara con el espectro de la trama actual. Si la diferencia
+	supera un umbral, se considera que la trama contiene voz, y si no, que se trata de un silencio.
+	El umbral es adaptativo, y varía en función de la estimación de SNR. De esta forma, puede
+	adaptarse a niveles de ruido cambiantes a lo largo de la señal. Para ello es necesario
+	indicar el menor y mayor valor de SNR esperado, con \p SNR0 y \p SNR1 respectivamente.
+
+	Cada vez que una trama es clasificada como silencio, se actualiza la estimación del espectro
+	y la potencia de ruido, con un factor de olvido \p Nalfa. Igualmente, para cada trama clasificada
+	como voz, se actualiza la estimación de SNR con un factor de olvido \p SNRalfa. De esta forma,
+	se van adaptando los umbrales a las nuevas condiciones de ruido.
+
+	\subsection preprocessing Pre-procesado
+
+	Es necesario hacer una primera estimación del espectro de ruido y de la relación
+	SNR, antes de empezar a aplicar el algoritmo. Para ello tenemos dos opciones.
+
+	Si \p RealTime no está activado, la inicialización se realiza mediante un pre-procesado
+	y una sencilla detección de silencios por umbral de potencia. todas las tramas clasificadas
+	como silencio son usadas para realizar la estimación del espectro y la potencia de ruido.
+	Igualmente, las tramas clasificadas como voz se utilizan para estimar la potencia de señal.
+	Así se consigue unos valores generales con los que empezar a realizar una detección más precisa.
+	El umbral de este pre-procesado se indica mediante \p PowThr.
+
+	\note El valor de \p PowThr se especifica en porcentaje. Durante el pre-procesado se estiman los
+	valores máximo y mínimo de la potencia, y el umbral se fija como este porcentaje medido en su
+	rango. Es decir, si indicamos 20% y los valores extremos de potencia son 50 dB y 100 dB, el umbral
+	se fijará en (100-50)*0.2+50=60 dB.
+
+	Hay que tener cuidado con el valor de la variable \p Ninit. Esta variable indica el mínimo número
+	de tramas que han de ser utilizadas para calcular el nivel de ruido de la señal.
+	Si durante el pre-procesaro no se encuentran \p Ninit tramas clasificadas como silenciosas,
+	el algoritmo no podrá inicializarse, y dará como salida todo-voz (una única marca de voz
+	durante toda la longitud del archivo), presentando un warning a la salida. Por tanto, hay que
+	asegurarse que en los archivos a procesar haya al menos \p Ninit*FrameRateMs milisegundos de silencio.
+	Si es necesario, se puede reducir el valor de \p Ninit, pero un valor de inicialización demasiado bajo
+	puede dar lugar también a una mala estimación del espectro de ruido, y por tanto, una mala detección
+	de silencios. Por eso, en este caso, se ha optado por suponer que todo es voz.
+
+	Si \p RealTime está activado, esta inicialización se realiza en línea (aunque no realmente en
+	tiempor real). Se utilizan las primeras \p Ninit tramas para inicializar el espectro y
+	potencia de ruido. Por lo tanto, es necesario que estas primeras tramas no tengan voz, o la detección
+	de silencios fallará estrepitosamente.
+
+	En el caso de la inicialización en línea, no hay forma de conocer la potencia de la señal, por lo que
+	la SNR se tiene que inicializar de otra forma. Si se conoce la SNR aproximada de la señal de antemano,
+	se puede indicar mediante la opción \p -SNRstart. El algoritmo toma este valor como SNR de partida,
+	y luego ya se irá adaptando según vaya detectando segmentos de voz. Si no se conoce este valor, se toma
+	la media entre \p SNR0 y \p SNR1. No es que sea la mejor aproximación, pero es la única que tenemos.
+
+	\note Debido a estos problemas a la hora de estimar la potencia de señal, con la inicialización en línea
+	es conveniente que \p SNRalfa se rebaje un poco, de forma que la potencia de señal se adapte más
+	rápidamente.
+
+
+	\subsection handover Hand-over y post-procesado
+
+	El valor \p Handover controla el número de tramas que han de ser clasificadas como silencio
+	antes de que se decida que realmente es un segmento silencioso. Es decir, las primeras
+	\p Handover tramas clasificadas como silencio después de un segmento sonoro quedarán incluidas
+	en la marca del segmento sonoro. La cuestión es que es preferible extender las marcas de
+	voz y marcar como voz un trozo de silencio que marcar como silencio un trozo de voz mal clasificado
+	y perder esa información. En cualquier caso, una vez finalizado el algoritmo, se realiza un
+	post-procesado para eliminar todas las marcas de silencio con una duración inferior a
+	\p MinSilDur y las marcas de voz de duración inferior a \p MinVocDur.
+
+	\note Tal y como se ha implementado, las marcas de silencio y voz se colocan coincidiendo
+		 con el principio y final de las tramas detectadas como vocales y silenciosas.
+		 Si se quiere que las marcas se coloquen en el centro de las tramas, se deben
+		 descomentar las líneas de código correspondientes para sustituir a los comandos
+		 de escritura en el archivo de salida.
+
+	\todo Pruebas exhaustivas: Tomar archivos con silencios marcados (preferiblemente a mano) y
+		pasar el programa. Comparar los resultados con las marcas manuales y las
+		marcas generadas por mrkpf. Detectar errores (inserción, eliminación, precisión)
+
+	\todo El postprocesado que hemos hecho ¿puede hacerse directamente dentro del algoritmo? Ventajas:
+		puede hacerse en tiempo real y además podemos hacer un merge automático.
+*/
+/*!
+ * \brief Estimación de actividad vocal
+ * 
+ * \author Erik Lounge \<erik.lounge(ARROBA)wanadoo.es\>
+ * \version
+ * \code
+ * 		Version  dd/mm/aa  Autor     Proposito de la edicion
+ * 		-------  --------  --------  -----------------------
+ * 		1.0.0    04/03/10  ikerl     Codificación inicial
+ * \endcode
+ * 
+ * 
+ * 
+ * Esta clase se encarga de gestionar un algoritmo de detección de actividad vocal
+ * (VAD por sus siglas en inglés) basado en envolvente espectral a largo plazo (LTSE).
+ * El algoritmo utilizado es una modificación del presentado en:
+ * 
+ * Ramirez, Javier and Segura, Jose C. and Benitez, Carmen and de la Torre, Angel and Rubio, Antonio,
+ * "Efficient Voice Activity Detection Algorithms Using Long Term Speech Information",
+ * Speech Communication, vol. 42, pp. 271-287, 2004.
+ * 
+ * El algoritmo modificado que está implementado puede encontrarse en:
+ * 
+ * Luengo, Iker and Navas, Eva and Odriozola, Igor and Saratxaga, Ibon and Hernaez, Inmaculada
+ * and Sainz, Iñaki and Erro, Daniel
+ * "Modiﬁed LTSE VAD algorithm for applications requiring reduced silence frame misclassiﬁcation",
+ * Proc. of LREC 2010
+ * 
+ * Entre los dos artículos se debería tener una idea bastante maja de cómo va el algoritmo, por lo
+ * que aquí sólo voy a tratar de aclarar cuestiones sobre su implementación y configuración. Sin embargo,
+ * para entender qué representa cada parámetro de configuración, 
+ * es necesario dar una visión general de cómo funciona este algoritmo. Ojo, es una descripción
+ * muy poco rigurosa, no hay que tomarse todo al pié de la letra. Sólo se explica lo extrictamente
+ * necesario.
+ * 
+ * La LTSE de una trama es una aproximación de la envolvente espectral de la trama más menos una
+ * ventana de N tramas por delante y por detrás. esta ventana de 2N+1 tramas, cuya trama central
+ * es la actual, es lo que vamos a llamar 'ventana LTSE'. Calculada la LTSE de la trama actual,
+ * se compara esta LTSE con el espectro estimado del ruido. Si la diferencia es superior a un
+ * umbral \f$ \gamma \f$, se considera que la trama contiene voz. Si no, se considera que sólo es ruido.
+ * 
+ * El umbral \f$ \gamma \f$ depende de la SNR estimada de la señal. Además, por cada trama que se
+ * clasifica como silencio, se actualiza el espectro estimado de ruido y la potencia estimada de ruido.
+ * Igualmente, por cada trama clasificada como voz se actualiza la potencia estimada de señal. Con esto,
+ * la SNR también se va actualizando.
+ * 
+ * Por tanto, los elementos clave de este algoritmo son:
+ * 
+ * 	- La ventana de análisis LTSE, de 2N+1 muestras
+ * 	- El espectro estimado del ruido
+ * 	- La potencia estimada de ruido y de señal
+ * 	- La SNR estimada (que se calcula a partir de las anteriores)
+ * 	- El cálculo del umbral.
+ * 
+ * 
+ * 
+ * \section vad_use Utilización del VAD
+ * 
+ * El algoritmo consta de de unas tres partes: modelado de ruido, inicializacion del buffer LTSE
+ * y el procesado VAD propiamente dicho. Además, antes de todo esto, es necesario configurar el
+ * objeto con los parámetros adecuados.
+ * 
+ * \par Configuración
+ * 
+ * Prácticamente toda la configuración que necesita la clase se da mediante un objeto de tipo vad_config.
+ * El significado de cada uno de sus elementos se explicará según vayan apareciendo en la documentación.
+ * El resto de valores necesarios son los solicitados por la función Reset():
+ * 
+ * 	- El tamaño de las tramas (en muestras)
+ * 	- El tipo de enventanado de las tramas (ver RFFT)
+ * 	- La SNR inicial
+ * 
+ * Es necesario proporcionar la SNR inicial, pues el algoritmo no tiene forma alguna de estimarla. Esta SNR
+ * inicial puede calcularse mediante un pre-procesado de la señal, o en el peor de los casos, estimarse
+ * a huevo. Arréglatelas como quieras, pero el algoritmo la necesita.
+ * 
+ * Las tramas que se dan al sistema no tienen que estar enventanadas, él mismo ya aplica la ventan
+ * correcta. En caso de que las tramas ya estén enventanadas, será necesario indicar XFFT_WIN_NONE como
+ * ventana, para evitar que se enventane dos veces. Por defecto, se utiliza ventana de Hamming.
+ * 
+ * El constructor de vad_config ya define los valores por defecto que se han estimado óptimos hasta el
+ * momento, por lo que si se quiere dejar los valores por defecto, basta con no modificar ningún elemento.
+ * En caso contrario, reescribir el elemento que se quiere modificar y ya está.
+ * 
+ * Una forma de inicializar el objeto vad es a través del constructor:
+ * 
+ * \code
+ * 		vad_config cfg;				//Si no modificamos nada usamos los valores por defecto
+ * 		vad vad_object(cfg, 80);	//Tramas de 80 muestras
+ * \endcode
+ * 
+ * Otra forma es utilizando el constructor por defecto y mediante la función Reset():
+ * 
+ * \code
+ * 		vad vad_object;			//Constructor por defecto
+ * 
+ *		//Hacemos cositas por el camino
+ * 		vad_config cfg;
+ * 		cfg.Nalfa = 0.95;		//Modificamos algunos parámetros
+ * 		cfg.SNRalfa = 0.95;
+ * 
+ *		//Inicializamos el objeto
+ * 		vad_object.Reset(cfg, 80);
+ * \endcode
+ * 
+ * Este método de construir puede ser útil si queremos aplicar el VAD a varios archivos
+ * diferentes o con diferentes configuraciones. El VAD mantiene una serie de memorias internas
+ * que es necesario resetear si pasamos a procesar otro archivo o queremos procesar el mismo
+ * otra vez, lo cual es precisamente lo que hace Reset():
+ * 
+ * \code
+ * 		vad vad_object;			//Constructor por defecto
+ * 
+ *		//Hacemos cositas por el camino
+ * 		vad_config cfg;
+ * 		cfg.Nalfa = 0.95;		//Modificamos algunos parámetros
+ * 		cfg.SNRalfa = 0.95;
+ * 
+ * 		for (int i = 0; i < NumFicheros; ++i)
+ * 		{
+ *			//Hay que resetear el VAD para cada fichero
+ * 			vad_object.Reset((cfg, 80, XFFT_WIN_BLACK);		//Y esta vez, con ventena personalizada
+ * 
+ *			//Abrir ficheros, tomar tramas, aplicar el VAD....
+ * 		}
+ * \endcode
+ * 
+ * \note Si se llama a Reset() en medio de procesar un archivo, se tendrán unos
+ * 		bonitos problemas. Mejor no lo hagas.
+ * 
+ * Lo único importante es recordar que un objeto construido por el constructor por defecto
+ * NO ESTÁ INICIALIZADO, y por tanto, es inutil. O se utiliza el constructor inicializador
+ * o se llama a Reset().
+ * 
+ * 
+ * \par Modelado de ruido
+ * 
+ * El modelado de ruido es relativamente sencillo. Tomamos una serie de tramas para las que SABEMOS que no
+ * hay voz, sólo ruido, y se las damos al sistema para que haga el modelado. Durante este modelado
+ * se calculan el espectro medio y la potencia de ruido.
+ * 
+ * Para ello se ha de utilizar la función NoiseInit(). En lugar de darle al objeto todas
+ * las tramas de inicialización de golpe, se las damos una a una, llamando varias veces a esta función:
+ * 
+ * \code
+ * 		vad vad_object;
+ * 
+ *		//Inicialización y otras cosas
+ * 		...
+ * 
+ *		//noise_frame_number es el número de tramas que usaremos para inicializar el ruido
+ * 		int noise_frame_number = GetNoiseFrameNumber()
+ * 		for (int i = 0; i = noise_frame_number; ++i)
+ * 		{
+ *			//Tomamos la trama y se la damos al sistema
+ * 			double* noise_frame = GetNoiseFrame(i);
+ * 			vad_object.NoiseInit(noise_frame);
+ * 		}
+ *		//Y ya está
+ * \endcode
+ * 
+ * Aunque no hay ninguna condición, se recomienda que la inicialización del ruido se haga con
+ * unas 10 a 20 tramas, para tener una estimación bastante robusta. Como regla general se
+ * considera que 15 están bien.
+ * 
+ * Estas tramas de inicialización pueden conseguirse mediante un pre-procesado (haciendo un VAD
+ * rápido y cutre por potencia, por ejemplo, y cortando a un cierto umbral) o suponer que
+ * las primeras tramas de la señal no contienen voz y usar esas.
+ * 
+ * \note Antes de empezar a utilizar el VAD es necesario hacer esta inicialización.
+ * 		Si no se hace, funcionará fatal. No creo que de errores, pero los resultados
+ * 		serán un desastre.
+ * 
+ * 
+ * \par Inicializacion del buffer LTSE
+ * 
+ * Como ya se ha explicado, el algoritmo mantiene un buffer de más menos N tramas alrededor
+ * de la actual. Esto tiene dos implicaciones directas:
+ * 
+ * 	- La trama para la cual se está dando la decisión NO ES LA TRAMA QUE SE ACABA DE LEER DEL ARCHIVO
+ * 		DE AUDIO. La decisión se da siempre para N tramas anteriores.
+ * 	- Es necesario llenar el buffer LTSE al menos hasta la mitad para empezar a recuperar resultados.
+ * 
+ * Dicho de otra forma, si tomamos un archivo de audio y en un momento dado estamos leyendo la trama
+ * i-ésima (i=1,...,NSamples), y se la pasamos al VAD (mediante doVAD()), el resultado devuelto es la decisión para
+ * la trama i-N.
+ * 
+ * Si ahora suponemos que i < N, entonces estará devolviendo el resultado para una trama i-N <= 0, lo cual
+ * no existe. Por lo tanto, debemos llenar el buffer con N tramas antes de poder recuperar la primera decisión.
+ * Las primeras N veces que se llame a doVAD(), el sistema no hace nada más que poblar el buffer,
+ * y la función siempre devuelve SILENCIO. A partir de ahí empieza a devolver resultados.
+ * 
+ * El tamaño completo del buffer es 2N+1, y viene dado por vad_config::LTWindowLen. Este valor DEBE SER IMPAR!!!!!
+ * (para poder tener una ventana centrada en la trama actual)
+ * 
+ * \code
+ * 		vad_config cfg;
+ * 		cfg.LTWindowLen = 15	//Debe ser impar
+ * 		vad vad_object (cfg, 80);
+ * 
+ *		//Inicialización del ruido
+ * 		...
+ * 
+ * 		for (int i = 0; i < (cfg.LTWindowLen-1)/2; ++i)
+ * 		{
+ *			//Tomamos la trama y se la damos al sistema
+ * 			double* frame = GetFrame(i);
+ * 			vad_object.doVAD(frame);	//Descartamos el resultado, no sirve para nada
+ * 		}
+ * 
+ *		//Y ya podemos empezar
+ * 		for (; i < NFrames; ++i)
+ * 		{
+ *			//Tomamos la trama y se la damos al sistema
+ * 			double* frame = GetFrame(i);
+ *			//Recuerda que el VAD estimado no es el que se corresponde con la trama actual
+ * 			vad[i-(cfg.LTWindowLen-1)/2] = vad_object.doVAD(frame);
+ * 		}
+ * \endcode
+ * 
+ * \section vad_threshold Umbral adaptativo
+ * 
+ * Como ya se ha indicado, el umbral de LTSD varía según la SNR estimada. Esta variación es lineal:
+ * a mayor SNR, mayor es el umbral. Pero existen unos límites de saturación.
+ * 
+ * 	- Si SNR < cfg.SNR0 entonces \f$ \gamma \f$ = cfg.gamma0
+ * 	- Si SNR > cfg.SNR1 entonces \f$ \gamma \f$ = cfg.gamma1
+ * 	- En cualquier otro caso, \f$ \gamma \f$ toma un valor lineal entre esos puntos.
+ * 
+ * Además, para permitir personalizar el punto de trabajo, se permite aplicar un offset a la LTSD
+ * (configurado mediante la opción vad_config::offset).
+ * Valores positivos del offset hacen que se favorezca la decisión VOZ. Valores negativos hacen
+ * que se tienda más a la decisión SILENCIO. Con esto es posible modificar el comportamiento del sistema
+ * según si es más importante que no haya tramas de silencio clasificadas como voz o tramas de voz clasificadas
+ * como silencio.
+ * 
+ * \section vad_adaptative Adaptación del ruido
+ * 
+ * El espectro del ruido, potencia de ruido y potencia de la señal se van adaptando a medida que las
+ * tramas se van clasificando como VOZ o SILENCIO. Esta adaptación viene controlada por varias opciones de
+ * vad_config.
+ * 
+ * Cuando una trama se clasifica como VOZ, se toman cfg::ActWindowLen tramas anteriores a ella y se calcula
+ * la potencia media de señal en estas tramas. La potencia de señal se actualiza como:
+ * 
+ * \code
+ * 		//Promediamos la potencia de cfg::ActWindowLen tramas anteriores
+ * 		double SpowAct = GetMeanPow(cfg.ActWindowLen);
+ * 
+ * 		SignaPow = cfg.SNRalfa * SignalPow + (1-cfg.SNRalfa) * SpowAct;
+ * \endcode
+ * 
+ * Igualmente, por cada trama que se clasifica como SILENCIO, se hace algo parecido con la potencia de ruido.
+ * En este caso además se actualiza el espectro del ruido:
+ * 
+ * \code
+ * 		//Promediamos la potencia y el espectro de cfg::ActWindowLen tramas anteriores
+ * 		double NpowAct = GetMeanPow(cfg.ActWindowLen);
+ * 		double* NspecAct = GetMeanSpectrum(cfg.ActWindowLen);
+ * 
+ * 		NoisePow = cfg.Nalfa * NoisePow + (1-cfg.Nalfa) * NpowAct;
+ * 		for (int i = 0; i < Nfft; ++i)
+ * 			NoiseSpec[i] = cfg.Nalfa * NoiseSpec[i] + (1-cfg.Nalfa) * NspecAct[i];
+ * \endcode
+ * 
+ * 
+ * \section vad_handover Handover
+ * 
+ * El handover es una técnica para retrasar el paso de la decisión VOZ a la decisión SILENCIO. Su origen
+ * está en los sistemas de reconocimiento automático del habla, donde es muy importante que no haya tramas
+ * de voz clasificadas como silencio, para no perder información. Para ello, cuando hay una serie de tramas
+ * clasificadas como silencio, y de pronto llega una que se clasifica como voz, la decisión de SILENCIO se
+ * mantiene durante unas cuantas tramas de forma 'artificial'. Si todas esas tramas se clasifican como SILENCIO,
+ * entonces se realiza la transición y se empiezan a generar decisiones de SILENCIO.
+ * 
+ * El handover viene controlado por la opción cad_config::Handover.
+ * 
+ * 
+ */
+class vad
+{
+
+
+public:
+	///Estructura para inicialización de la clase vad
+	/*! \sa vad */
+	struct vad_config
+	{
+		public:
+	
+		/*!\name Variables asociadas con la señal y el ruido estimados
+		*/
+		//\{
+		DOUBLE SNR0;				///<Mínima SNR considerada para el cálculo del umbral
+		DOUBLE SNR1;				///<Máxima SNR considerada para el cálculo del umbral
+		INT ActWindowLen;			///<Número de tramas usadas para actualización de ruido y señal
+		FLOAT Nalfa;				///<Coeficiente de memoria para la actualización del ruido
+		FLOAT SNRalfa;				///<Coeficiente de memoria para la actualización de la SNR
+		//\}
+		
+		/*!\name Variables asociadas con el algoritmo LTSD
+		*/
+		//\{
+		INT LTWindowLen;			///<Número de tramas usadas para análisis LongTerm
+		DOUBLE gamma0;				///<Umbral asociado a SNR0
+		DOUBLE gamma1;				///<Umbral asociado a SNR1
+		INT Handover;				///<Número de tramas usadas para handover
+		DOUBLE offset;				///<Offset para la LTSD
+									//Permite modificar el punto de trabajo
+		//\}
+		
+		public:
+		
+		///Constructor
+		/*!
+		 * Inicializa el objeto con los valores por defecto.
+		 * Si se quiere cambiar alguno, basta con sobreescribirlo
+		 */
+		inline
+		vad_config()
+		{
+			SNR0 = 10.0;
+			SNR1 = 80.0;
+			ActWindowLen = 6;
+			Nalfa = 0.99;
+			SNRalfa = 0.99;
+			LTWindowLen = 13;
+			gamma0 = 15.0;
+			gamma1 = 40.0;
+			Handover = 0;
+			offset = 0.0;
+		}
+	};
+	
+protected:
+	///Clase para implementar un buffer de FFT's
+	/*!
+	 * Esta clase está muy poco definida, y queda muy chapucera.
+	 * Por eso la dejo como interna a vad y en su ámbito privado,
+	 * para que nadie la utilice.
+	 * 
+	 * Un ejemplo sencillo del uso de esta clase:
+	 * 
+	 * \code
+	 * 		INT BufSize = 10;
+	 * 		INT fftsize;
+	 * 		FFTbuffer fftbuf(BufSize, fftsize);
+	 * 
+	 *		//Llenamos el buffer con datos
+	 * 		pDOUBLE fft;
+	 * 		for (INT i = 0; i < BufSize; ++i)
+	 * 		{
+	 * 			fft = GetNewFft();
+	 * 			
+	 *			//Antes de meter el nuevo dato es necesario avanzar!!!!
+	 * 			fftbuf.Advance();
+	 * 			
+	 *			//Y metemos el dato en cola!!!!
+	 * 			for (INT j = 0; j < fftsize; ++j)
+	 * 				fftbuf.Tail()[j] = fft[j];
+	 * 
+	 *			//O alternativamente 
+	 * 			for (INT j = 0; j < fftsize; ++j)
+	 * 				fftbuf[fftbuf.TailIdx()][j] = fft[j];
+	 * 		}
+	 * 
+	 *		//Ahora trabajamos con el buffer
+	 *		//Se puede utilizar el operator[] de forma normal
+	 * 		DoSomething(fftbuf);
+	 * 
+	 *		//Y podemos meter nuevos elementos, siempre que avancemos previamente
+	 * 		fftbuf.Advance();
+	 * 		for (INT j = 0; j < fftsize; ++j)
+	 * 			fftbuf.Tail()[j] = fft[j];
+	 * \endcode
+	 */
+	class FFTbuffer
+	{
+	protected:
+		DOUBLE** m_buffer;	///<La memoria del buffer
+		INT m_Nelem;		///<Tamaño del buffer
+		INT m_head;			///<índice a cabeza (elemento más viejo)
+		INT m_tail;			///<índice a cola (elemento más nuevo)
+		//Si m_tail == -1 es que el buffer está vacío.
+		//Si m_head == (m_tail+1)%m_Nelem es que el buffer está lleno del todo
+	
+	public:
+		
+		inline
+		FFTbuffer ()
+		: m_buffer(NULL), m_Nelem (0), m_head (0), m_tail (-1)
+		{}
+		
+		FFTbuffer (INT Nelem, INT Nfft);
+		
+		~FFTbuffer();
+		
+		///Cambia el tamaño del buffer
+		void
+		Resize (INT Nelem, INT Nfft);
+				
+		///Sobrecarga del operador []
+		/*!
+		 * Permite abstraerse de la naturaleza circular del buffer
+		 * 
+		 * \note No comprueba si idx está dentro de los límites del buffer o no. Esto
+		 * 		es coherente con el comportamiento de un array C estándar.
+		 */
+		inline
+		const DOUBLE*
+		operator[] (int idx) const
+		{ return m_buffer[(m_head + idx)%m_Nelem]; }
+		
+		///Sobrecarga del operador []
+		/*!
+		 * Permite abstraerse de la naturaleza circular del buffer
+		 * 
+		 * \note No comprueba si idx está dentro de los límites del buffer o no. Esto
+		 * 		es coherente con el comportamiento de un array C estándar.
+		 */
+		inline
+		DOUBLE*
+		operator[] (int idx)
+		{ return m_buffer[(m_head + idx)%m_Nelem]; }
+		
+		///Avanza el puntero de cola
+		inline
+		void
+		Advance ()
+		{
+			if (m_tail >= 0 && m_head == (m_tail+1)%m_Nelem)
+				//Buffer lleno, debemos eliminar un elemento de cabeza
+				m_head = (m_head+1)%m_Nelem;
+			m_tail = (m_tail+1)%m_Nelem;
+		}
+		
+		///Devuelve el último elemento del buffer (el más nuevo)
+		/*!
+		 * En caso de que el buffer esté vacío, devuelve NULL
+		 */
+		inline
+		const DOUBLE*
+		Tail () const
+		{ if (m_tail < 0) return NULL; return m_buffer[m_tail]; }
+
+		///Devuelve el último elemento del buffer (el más nuevo)
+		/*!
+		 * En caso de que el buffer esté vacío, devuelve NULL
+		 */
+		inline
+		DOUBLE*
+		Tail ()
+		{ if (m_tail < 0) return NULL; return m_buffer[m_tail]; }
+
+		///Devuelve el índice al último elemento del buffer (el más nuevo)
+		/*!
+		 * En caso de que el buffer esté vacío, devuelve -1
+		 */
+		inline
+		INT
+		TailIdx () const
+		{ return m_tail; }
+
+	};
+	
+	
+	
+	
+	
+	
+	
+		
+public:
+	///Constructor
+	/*!
+	 * Antes de utilizar el objeto será necesario llamar a Reset() para
+	 * inicializar los valores de configuración
+	 */
+	inline
+	vad()
+	: m_fftObject(NULL), m_NoiseFFT(NULL), m_NoiseFFTAct(NULL), m_LTSE(NULL)
+	/*Deben iniciarse los punteros a NULL para que el Reset() no tenga problemas*/
+	{ }
+	///Constructor
+	/*!
+	 * Inicializa los valores de configuración llamando a Reset()
+	 */
+	inline
+	vad (const vad_config & cfg, DOUBLE snr, FLOAT FrameLen, XFFT_WIN WinType)
+	: m_fftObject(NULL), m_NoiseFFT(NULL), m_NoiseFFTAct(NULL), m_LTSE(NULL)
+	/*Deben iniciarse los punteros a NULL para que el Reset() no tenga problemas*/
+	{ Reset(cfg, FrameLen, WinType); }
+
+	///Constructor
+	/*!
+	 * Inicializa los valores de configuración llamando a Reset()
+	 * Utiliza la ventana por defecto (ver Reset())
+	 */
+	inline
+	vad (const vad_config & cfg, DOUBLE snr, FLOAT FrameLen)
+	: m_fftObject(NULL), m_NoiseFFT(NULL), m_NoiseFFTAct(NULL), m_LTSE(NULL)
+	/*Deben iniciarse los punteros a NULL para que el Reset() no tenga problemas*/
+	{ Reset(cfg, snr, FrameLen); }
+	
+	///Destructor
+	inline
+	~vad()
+	{ Destruct(); }
+	
+	///Inicializa los valores de configuración y la memoria reservada
+	bool
+	Reset (const vad_config & cfg, DOUBLE snr, FLOAT FrameLen, XFFT_WIN WinType = XFFT_WIN_HAMM);
+	
+	///Utiliza una trama para la inicialización de ruido
+	void
+	NoiseInit (pDOUBLE frame);
+
+	
+	///Realiza la decisión VAD sobre la trama
+	bool
+	doVAD (pDOUBLE frame);
+	
+	
+/*!\name get-ters y set-ters
+ * 
+ * Es seguro llamar a estas funciones incluso después de haber inicializado el objeto.
+ * Pocas veces tiene sentido hacerlo, pero es seguro.
+ */
+//\{
+	
+	///Número de muestras que deben tener las tramas
+	inline
+	LONG
+	getFrameLen () const
+	{ return m_FrameLen; }
+	
+	///Número de puntos FFT que se están usando.
+	/*!
+	 * será la siguiente potencia de dos de getFrameLen().
+	 * 
+	 * Bueno, en realidad, la mitad de la siguiente potencia de dos, ya que
+	 * al ser simétrica, sólo devuelve medio espectro.
+	 */
+	inline
+	INT
+	getNfft () const
+	{ return m_Nfft; }
+
+	
+	///Número de tramas usadas para análisis LongTerm
+	inline
+	INT
+	getLTWindowLen () const
+	{ return m_LTWindowLen; }
+
+	///El estado del buffer
+	/*!
+	 * Devuelve verdadero si el buffer ya está suficientemente lleno como para 
+	 * empezar a calcular cosas
+	 */
+	inline
+	bool
+	IsBufferFull () const
+	{ return (m_bufferedFrames >= (m_LTWindowLen-1)/2); }
+	
+	///Potencia estimada del ruido en este momento
+	inline
+	DOUBLE
+	getNoisePow () const
+	{ return m_NoisePow; }
+	
+	inline
+	void
+	setNoisePow (DOUBLE np)
+	{ m_NoisePow = np; }
+	
+	///Potencia estimada de la señal en este momento
+	inline
+	DOUBLE
+	getSignalPow () const
+	{ return m_SignalPow; }
+
+	inline
+	void
+	setSignalPow (DOUBLE sp)
+	{ m_SignalPow = sp; }
+	
+	///SNR estimada en este momento
+	inline
+	DOUBLE
+	getSNR () const
+	{ return m_SNR; }
+
+	/*!
+	 * Puede servir para inicializar la SNR inicial si todavía no se
+	 * conocía cuando se ha hecho el Reset()
+	 */
+	inline
+	void
+	setSNR (DOUBLE snr)
+	{ m_SNR = snr; }
+
+	///Límite inferior de SNR
+	inline
+	DOUBLE
+	getSNR0 () const
+	{ return m_SNR0; }
+
+	inline
+	void
+	setSNR0 (DOUBLE snr0)
+	{ m_SNR0 = snr0; }
+	
+	///Límite superior de SNR
+	inline
+	DOUBLE
+	getSNR1 () const
+	{ return m_SNR1; }
+
+	inline
+	void
+	setSNR1 (DOUBLE snr1)
+	{ m_SNR1 = snr1; }
+	
+	///Umbral de SNR0
+	inline
+	DOUBLE
+	getGamma0 () const
+	{ return m_gamma0; }
+
+	inline
+	void
+	setGamma0 (DOUBLE gamma0)
+	{ m_gamma0 = gamma0; }
+	
+	///Umbral de SNR1
+	inline
+	DOUBLE
+	getGamma1 () const
+	{ return m_gamma1; }
+
+	inline
+	void
+	setGamma1 (DOUBLE gamma1)
+	{ m_gamma1 = gamma1; }
+	
+	///Número de tramas usadas para actualización de ruido y señal
+	inline
+	INT
+	getActWindowLen () const
+	{ return m_ActWindowLen; }
+
+	inline
+	void
+	setActWindowLen (INT ActWindowLen)
+	{ assert ((m_LTWindowLen-1/2) >= ActWindowLen);
+	  m_ActWindowLen = ActWindowLen; }
+
+	///Coeficiente de memoria para la actualización del ruido
+	inline
+	FLOAT
+	getNalfa () const
+	{ return m_Nalfa; }
+
+	inline
+	void
+	setNalfa (FLOAT Nalfa)
+	{ m_Nalfa = Nalfa; }
+	
+	///Coeficiente de memoria para la actualización del la señal
+	inline
+	FLOAT
+	getSNRalfa () const
+	{ return m_SNRalfa; }
+
+	inline
+	void
+	setSNRalfa (FLOAT SNRalfa)
+	{ m_SNRalfa = SNRalfa; }
+	
+	///offsest
+	inline
+	DOUBLE
+	getOffset () const
+	{ return m_offset; }
+
+	inline
+	void
+	setOffset (DOUBLE offset)
+	{ m_offset = offset; }
+	
+	///offsest
+	inline
+	INT
+	getHandover () const
+	{ return m_Handover; }
+
+	inline
+	void
+	setHandover (INT Handover)
+	{ m_Handover = Handover; }
+	
+//\}
+
+		
+		
+		
+protected:
+		
+	///Destruye el objeto
+	void
+	Destruct();
+	
+	///Calcula el umbral de LTSD
+	DOUBLE
+	Gamma() const;
+	
+	///Actualiza el modelo de señal
+	void
+	ActualizeSignal();
+	
+	///Actualiza el modelo de ruido
+	void
+	ActualizeNoise();
+	
+	///Añade una trama nueva al buffer
+	void
+	AddToBuffer (pDOUBLE frame);
+	
+	///Calcula la LTSE del contenido del buffer
+	void
+	LTSE ();
+	
+	///Calcula la LTSD a partir de la LTSE y el espectro de ruido
+	DOUBLE
+	LTSD () const;
+
+	
+protected:
+		
+/*!\name Variables asociadas con el enventantado y el análisis FFT
+ */
+//\{
+	LONG m_FrameLen;			///<Longitud de la trama en muestras
+	XFFT_WIN m_WinType;			///<Tipo de ventana
+	pRFFT m_fftObject;			///<Objeto de análisis FFT
+	INT m_Nfft;					///<Número de puntos de las FFT
+	FFTbuffer m_memFFT;			///<Array circular de FFT necesario para el cálculo de LTSE
+								//Tendrá LTWindowLen elementos
+	INT m_bufferedFrames;		///<Auxiliar para saber si ya se ha llenado la mitad del buffer;
+//\}
+
+/*!\name Variables asociadas con la señal y el ruido estimados
+ */
+//\{
+	pDOUBLE m_NoiseFFT;			///<Espectro medio del ruido
+	INT m_NoiseInitFrames;		///<Número de tramas usadas en la inicialización del ruido
+	DOUBLE m_NoisePow;			///<Potencia estimada del ruido
+	DOUBLE m_SignalPow;			///<Potencia estimada de la señal
+	DOUBLE m_SNR;				///<SNR estimada
+	DOUBLE m_SNR0;				///<Mínima SNR considerada
+	DOUBLE m_SNR1;				///<Máxima SNR considerada
+	INT m_ActWindowLen;			///<Número de tramas usadas para actualización de ruido y señal
+	FLOAT m_Nalfa;				///<Coeficiente de memoria para la actualización del ruido
+	FLOAT m_SNRalfa;			///<Coeficiente de memoria para la actualización de la SNR
+	pDOUBLE m_NoiseFFTAct;		///<Usado durante la actualización del espectro de ruido
+								//Si hago que se reserve memoria en la inicialización, adelantamos trabajo
+//\}
+
+/*!\name Variables asociadas con el algoritmo LTSD
+ */
+//\{
+	INT m_LTWindowLen;			///<Número de tramas usadas para análisis LongTerm
+	DOUBLE m_gamma0;			///<Umbral asociado a SNR0
+	DOUBLE m_gamma1;			///<Umbral asociado a SNR1
+	INT m_Handover;				///<Número de tramas usadas para Hand Over
+	LONG m_NumSil;				///<Número de tramas silenciosas hasta ahora (para actualizar espectro)
+	LONG m_NumVoice;			///<Número de tramas sonoras hasta ahora (para actualizar espectro)
+	LONG m_HoSil;				///<Contador para HandOver
+	DOUBLE m_offset;			///<Offset para la LTSD
+								//Permite modificar el punto de trabajo
+	pDOUBLE m_LTSE;				///<Usado durante el cálculo de la LTSE
+								//Si hago que se reserve memoria en la inicialización, adelantamos trabajo
+//\}
+
+};
+

@@ -1,0 +1,930 @@
+/**********************************************************/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/*
+Copyright: 1994 - Grupo de Voz (DAET) ETSII/IT-Bilbao
+
+Nombre fuente................ XFFT2.C
+Nombre paquete............... SPL
+Lenguaje fuente.............. C (Borland C/C++ 3.1)
+Estado....................... Completado
+Dependencia Hard/OS.......... -
+Codigo condicional........... NDEBUG
+
+Codificacion................. Borja Etxebarria
+
+Version  dd/mm/aa  Autor     Proposito de la edicion
+-------  --------  --------  -----------------------
+1.4.0    02/01/97  Borja     nuevas funcs: getwinvec(), set/get0piweight
+1.3.3    27/08/95  Borja     SPL_FLOAT32 --> FLOAT32
+1.3.2    30/07/95  Borja     scope funciones explicito
+1.3.1    15/05/95  Borja     retoques en algunos comentarios.
+1.3.0    08/12/94  Borja     revision general (tipos,idx,nel,tnel...)
+1.2.1    14/03/94  Borja     bug: cepfm_getceps() --> cepfm_getcepfm()
+1.2.0    28/10/93  Borja     Soporte de diferentes tipos de enventanado.
+1.1.0    01/02/93  Borja     Calculo de cepstrum fft-modulo ('clase' cepfm).
+1.0.0    16/03/92  Borja     Codificacion inicial.
+
+======================== Contenido ========================
+<DOC>
+Funciones para el calculo eficiente y reiterado de FFT real.
+
+Ver XFFT1.C para informacion general sobre los modulos XFFT?.C.
+</DOC>
+===========================================================
+*/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/**********************************************************/
+
+#include "_xfft.h"
+
+/*<DOC>*/
+/**********************************************************/
+/* FFT real. Funcion constructora de la estructura.
+
+Recibe como parametros:
+- SPL_INT {np} : Numero de puntos de los vectores de datos (reales)
+.                de los que queremos calcular la FFT.
+.                {np}>0, y no tiene por que ser una potencia de 2 (relleno
+.                automatico con ceros).
+
+- SPL_INT {fftnp} : Numero de puntos de la FFT.
+.                   Si este parametro es cero, se utiliza la menor potencia
+.                   de dos superior o igual a {np}.
+.                   Si este valor no es cero, se utiliza la menor potencia
+.                   de dos superior o igual a {fftnp}. En caso de que {np}
+.                   sea mayor que {fftnp}, se utilizaran solo {fftnp} puntos
+.                   de los vectores de datos.
+.                   {fftnp}>=0, y no tiene porque ser potencia de 2.
+
+- SPL_BOOL {inv} : SPL_FALSE (o FFT_DIRECT) para efectuar FFT directa.
+.                  SPL_TRUE (o FFT_INVERSE) para efectuar FFT inversa.
+
+- SPL_FLOAT {ufactor} : factor de escalado. Multiplica al resultado
+.                       de la FFT directa, o divide al resultado
+.                       si es una FFT inversa. Por lo general este
+.                       factor es 1 (sin escalado). Si vale 0, tiene
+.                       un uso especial: la FFT directa se escala
+.                       de forma que el modulo de la tranformada
+.                       encaja con las amplitudes de las componentes
+.                       (lo que haria un equipo analizador de espectro);
+.                       en tal caso, 0 y pi estan realmente escaladas
+.                       por dos (por interaccion entre espectro positivo
+.                       y negativo. Si se hace rfft_set0piweight(TRUE)
+.                       esto se corrige y 0 y pi se deescalan. Es una
+.                       simplificacion, realmente habria que deescalar
+.                       todos los alrededores siguiendo la respuesta
+.                       de la ventana de analisis....
+
+- XFFT_WIN {win} : Codigo que identifica el tipo de ventana a
+.                  utilizar. Son los codigos XFFT_WIN_??? definidos
+.                  en XFFT.H. Ver rfft_setwin() para mas informacion.
+.                  Si se utilizar una ventana, sera de {np} puntos,
+.                  aunque si el numero de puntos de la fft es menor,
+.                  se utiliza este otro valor.
+
+- XFFT_WIN_FUNC {winfunc} : Puntero a una funcion que sigue el
+.                           prototipo indicado (xfft.h) que suministra
+.                           el usuario. Esta funcion se utiliza para
+.                           obtener la ventana a utilizar cuando
+.                           en {win} se envia XFFT_WIN_USER. Si este
+.                           puntero es NULL y se envia XFFT_WIN_USER
+.                           en {win}, no se utiliza ningun enventanado
+.                           (ventana rectangular).
+
+La funcion {devuelve} un puntero a una estructura, que debera utilizarse
+como primer parametro para el resto de las funciones rfft_???().
+Si no es posible crear la estructura, la funcion {devuelve} NULL.
+
+Aunque externamente parezca que el sistema utiliza {fftnp} puntos para
+la FFT, realmente aunque a nivel interno, se utiliza la mitad por
+tratarse de FFT de un vector real. Asi es mucho mas eficiente.
+Externamente esto pasa COMPLETAMENTE desapercibido. */
+
+PUBLIC pRFFT XAPI rfft_construct( SPL_INT np, SPL_INT fftnp,
+		SPL_BOOL inv, SPL_FLOAT ufactor,
+		XFFT_WIN win, XFFT_WIN_FUNC winfunc )
+/*</DOC>*/
+{
+	pRFFT r;
+	SPL_INT n, n2, n3;
+	assert(np>0);
+	assert(fftnp>=0);
+
+	r = (pRFFT)xfft_malloc(sizeof(RFFT));
+	if (r!=NULL) {
+		n = fft_n_bits((fftnp>0) ? fftnp : np);
+		r->_nbits = ((n) ? n-1 : n);
+		n2 = ( (n = (SPL_INT)1 << r->_nbits) >> 1 );
+		n3 = n<<1;
+		r->_np = ( (np>n3) ? n3 : np );
+
+		r->_revec = (SPL_pFLOAT)xfft_malloc(
+				sizeof(SPL_FLOAT)*(n+1));
+		r->_imvec = (SPL_pFLOAT)xfft_malloc(
+				sizeof(SPL_FLOAT)*(n+1));
+		r->_tinv = (SPL_pINT)xfft_malloc(sizeof(SPL_INT)*n);
+		r->_half_tsin = (SPL_pFLOAT)xfft_malloc(
+				sizeof(SPL_FLOAT)*n2);
+		r->_tsin = (SPL_pFLOAT)xfft_malloc(sizeof(SPL_FLOAT)*n2);
+		r->_tcos = (SPL_pFLOAT)xfft_malloc(sizeof(SPL_FLOAT)*n2);
+		if ((win!=XFFT_WIN_NONE)&&(r->_np))
+			r->_winvec = (SPL_pFLOAT)xfft_malloc(
+					sizeof(SPL_FLOAT)*r->_np);
+		else
+			r->_winvec = NULL;
+
+		if ( ((r->_revec==NULL)||(r->_imvec==NULL)||
+				((n)&&(r->_tinv==NULL))||
+				((n2)&&((r->_half_tsin==NULL)||
+				(r->_tsin==NULL)||(r->_tcos==NULL)))||
+				((win!=XFFT_WIN_NONE)&&(r->_np)&&
+				(r->_winvec==NULL))) == 0 ) {
+
+			if (n2) {
+				fft_fill_half_tsin(r->_half_tsin,n2);
+				fft_htsin_fill_tsin_tcos(r->_tsin,
+						r->_tcos,r->_half_tsin,n2);
+			}
+			fft_fill_tinv(r->_tinv,n);
+			r->_inv = inv;
+			r->_ufactor = ufactor;
+			r->_weight0pi=FALSE;
+
+			r->_owin = XFFT_WIN_NONE;
+			rfft_setwin(r,win,winfunc);
+		}
+		else {
+			rfft_destruct(r);
+			r=NULL;
+		}
+	}
+
+	return r;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* destructor para una estructura RFFT */
+
+PUBLIC SPL_VOID XAPI rfft_destruct( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	if (r->_revec)
+		xfft_free(r->_revec);
+	if (r->_imvec)
+		xfft_free(r->_imvec);
+	if (r->_tinv)
+		xfft_free(r->_tinv);
+	if (r->_half_tsin)
+		xfft_free(r->_half_tsin);
+	if (r->_tsin)
+		xfft_free(r->_tsin);
+	if (r->_tcos)
+		xfft_free(r->_tcos);
+	if (r->_winvec)
+		xfft_free(r->_winvec);
+	xfft_free(r);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica el uso de la ventana en la fft real.
+Enviar {win}==XFFT_WIN_??? para utilizar la ventana del tipo
+deseado. En xfft.h se definen constantes XFFT_WIN_??? para
+diversos tipos de ventanas (??? = HAMM, HANN, BART, BLACK,
+KAIS5, ... KAIS10, USER, NONE). Si {win} es XFFT_WIN_NONE o
+XFFT_WIN_RECT no se utiliza ninguna ventana. Si {win} es
+XFFT_WIN_USER, entonces se utilizara la ventana obtenida
+a traves de la funcion que el usuario suministra en el puntero
+{winfunc} (siempre y cuando sea distinto de NULL, ya que si es
+NULL no se utiliza ninguna ventana). En xfft.h se explica el
+prototipo que debe seguir esta funcion.
+
+Puesto que el proceso realizado puede implicar la creacion
+de vectores de datos utilizando memoria dinamica, la
+funcion {devuelve} SPL_TRUE si todo va bien, o SPL_FALSE si se
+produce algun error. En caso de error, la ventana se
+desconecta (se utiliza ventana rectangular).
+La ventana se maneja de forma optimizada: aunque se active y
+desactive sucesivamente no se hace ni una cuenta mientras no se
+cambie su longitud o se cambie de tipo de ventana.  */
+
+PUBLIC SPL_BOOL XAPI rfft_setwin( pRFFT r, XFFT_WIN win,
+		XFFT_WIN_FUNC winfunc )
+/*</DOC>*/
+{
+	INT i;
+	assert(r!=NULL);
+
+	r->_win = win;
+	r->_winfunc=winfunc;
+	r->_ufactor0 = (r->_np) ? 2./r->_np : 1;
+
+	if ((win!=XFFT_WIN_NONE)&&(r->_np)) {
+		if (r->_winvec==NULL) {
+			r->_owin=XFFT_WIN_NONE;
+			r->_winvec = (SPL_pFLOAT)xfft_malloc(
+					sizeof(SPL_FLOAT)*r->_np);
+		}
+		if (r->_winvec!=NULL) {
+			if (r->_owin!=r->_win) {
+				switch (r->_win) {
+				case XFFT_WIN_HAMM :
+					win_hamm(r->_winvec,r->_np);
+					break;
+				case XFFT_WIN_HANN :
+					win_hann(r->_winvec,r->_np);
+					break;
+				case XFFT_WIN_BLACK :
+					win_black(r->_winvec,r->_np);
+					break;
+				case XFFT_WIN_BART :
+					win_bart(r->_winvec,r->_np);
+					break;
+				case XFFT_WIN_KAIS5 :
+					win_kais(r->_winvec,r->_np,5.0);
+					break;
+				case XFFT_WIN_KAIS6 :
+					win_kais(r->_winvec,r->_np,6.0);
+					break;
+				case XFFT_WIN_KAIS7 :
+					win_kais(r->_winvec,r->_np,7.0);
+					break;
+				case XFFT_WIN_KAIS8 :
+					win_kais(r->_winvec,r->_np,8.0);
+					break;
+				case XFFT_WIN_KAIS9 :
+					win_kais(r->_winvec,r->_np,9.0);
+					break;
+				case XFFT_WIN_KAIS10 :
+					win_kais(r->_winvec,r->_np,10.0);
+					break;
+				case XFFT_WIN_USER :
+					if ((r->_winfunc)!=NULL)
+						(r->_winfunc)(r->_winvec,
+								r->_np);
+					else
+						r->_win=XFFT_WIN_NONE;
+					break;
+				default :
+					/* error: ventana desconocida */
+					assert(1==0); /* trigger */
+					r->_win=XFFT_WIN_NONE;
+					break;
+				}
+				r->_owin=r->_win;
+				if (r->_win!=XFFT_WIN_NONE) {
+					r->_winmean = 0;
+					for (i=0; i<r->_np; i++) r->_winmean += r->_winvec[i];
+					r->_winmean /= r->_np;
+				}
+				else
+					r->_winmean = 1;
+			}
+			r->_ufactor0 /= r->_winmean;
+		}
+		else {
+			r->_win=XFFT_WIN_NONE;
+			return SPL_FALSE;
+		}
+	}
+
+	return SPL_TRUE;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica el numero de puntos de los vectores de los que se
+quiere calcular la fft real, indicando que los vectores
+tendran {np} puntos. Si {np} es mayor que el numero de puntos de la
+FFT, {np} se trunca al valor del numero de puntos de la FFT.
+{devuelve} SPL_TRUE si todo va bien, o SPL_FALSE si se produce
+algun error, ya que puede ser necesario gestionar memoria dinamica.
+En caso de error, significa que se ha desconectado el enventanado (se
+utilizara ventana rectangular) */
+
+PUBLIC SPL_BOOL XAPI rfft_setnp( pRFFT r, SPL_INT np )
+/*</DOC>*/
+{
+	SPL_INT n;
+	assert(r!=NULL);
+	assert(np>0);
+
+	n = ((SPL_INT)1 << (r->_nbits+1));
+	if (np>n)
+		np = n;
+	if (np!=r->_np) {
+		r->_np = np;
+		if (r->_winvec!=NULL) {
+			xfft_free(r->_winvec);
+			r->_winvec = NULL;
+		}
+		return rfft_setwin(r,r->_win,r->_winfunc);
+	}
+	return SPL_TRUE;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica simultaneamente el numero de puntos de los vectores
+de datos y el uso del enventanado (ver rfft_setwin()).
+El valor SPL_BOOL que {devuelve} la funcion es similar al indicado
+en rfft_setwin() */
+
+PUBLIC SPL_BOOL XAPI rfft_setnpwin( pRFFT r, SPL_INT np,
+		XFFT_WIN win, XFFT_WIN_FUNC winfunc )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+	assert(np>0);
+
+	r->_win = XFFT_WIN_NONE;
+	rfft_setnp(r,np);
+	return rfft_setwin(r,win,winfunc);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* selecciona FFT inversa ({inv}==SPL_TRUE)  o
+FFT directa ({inv}=SPL_FALSE)  en la FFT */
+
+PUBLIC SPL_VOID XAPI rfft_setinv( pRFFT r, SPL_BOOL inv )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	r->_inv = inv;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica el factor de usuario en la FFT real.
+Este factor multiplica en la FFT directa, y divide en la inversa. */
+
+PUBLIC SPL_VOID XAPI rfft_setufactor( pRFFT r, SPL_FLOAT ufactor )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	r->_ufactor = ufactor;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* configura el factor de ponderacion en 0 y pi: escala
+por 1/2 en la fft directa, por 2 en la inversa. Para que
+funcione el factor de usuario debe ser 0.
+*/
+
+PUBLIC SPL_VOID XAPI rfft_set0piweight( pRFFT r, SPL_BOOL weight )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	r->_weight0pi=weight;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} si esta activo o no el factor de ponderacion
+en 0 y pi (escalar a 1/2). (aunque realmente solo estara
+activo si el factor de usuario es 0 */
+
+PUBLIC SPL_BOOL XAPI rfft_get0piweight( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_weight0pi;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el numero de puntos que deben tener los vectores
+de datos de los que se quiere calcular la FFT real */
+
+PUBLIC SPL_INT XAPI rfft_getnp( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_np;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el numero de puntos que se 'utilizan' en la FFT
+real. El utilizan esta entre comillas, porque realmente se van
+a usar la mitad de los indicados en una FFT compleja */
+
+PUBLIC SPL_INT XAPI rfft_getfftnp( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return ((SPL_INT)1 << (r->_nbits+1));
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el numero de puntos de los vectores resultado
+de la FFT real. Puesto que la FFT real es simetrica en la parte
+real y antisimetrica en la imaginaria, los vectores resultado
+solo devuelven la mitad de la FFT. Por tanto esta funcion
+{devuelve} la mitad+1 del numero de puntos de la FFT, es decir,
+en el rango 0 a PI (incluido PI) (equivale al rango de 0
+a la frecuencia de muestreo entre 2) */
+
+PUBLIC SPL_INT XAPI rfft_getvecnp( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return ((SPL_INT)1 << r->_nbits)+1;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el tipo de enventanado que se esta utilizando
+(XFFT_WIN_???, con ??? = NONE (o RECT), HAMM, HANN, ....
+consultar xfft.h ) */
+
+PUBLIC XFFT_WIN XAPI rfft_getwin( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_win;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} un puntero al vector que contiene la ventana
+de ponderacion. En caso de que no este disponible (porque
+no se utiliza ninguna ventana) se {devuelve} NULL.
+La longitud del vector ventana viene dada por rfft_getnp() */
+
+PUBLIC SPL_pFLOAT XAPI rfft_getwinvec( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	if (r->_win==XFFT_WIN_NONE)
+		return NULL;
+	return r->_winvec;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el funtero a la funcion de enventanado que
+ha suministrado el usuario */
+
+PUBLIC XFFT_WIN_FUNC XAPI rfft_getwinfunc( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_winfunc;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} si se esta calculando una FFT directa o inversa */
+
+PUBLIC SPL_BOOL XAPI rfft_getinv( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_inv;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el factor de usuario */
+
+PUBLIC SPL_FLOAT XAPI rfft_getufactor( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_ufactor;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} un puntero al vector real de la fft real.
+El usuario previamente habra tenido que calcular una fft.
+Este vector es interno y el usuario no debe borrarlo, aunque
+si puede modificarlo. En caso de calcular el modulo o el modulo al
+cuadrado de la transformada, el resultado se almacena en
+este mismo vector.
+Este vector tiene rfft_getvecnp() puntos, que encaja con el
+numero de puntos de la FFT divido por 2 y mas 1, y corresponde
+al rango 0 a PI (este ultimo inclusive) (en herzios, equivale al
+rango de 0 a frecuencia de muestreo entre 2) */
+
+PUBLIC SPL_pFLOAT XAPI rfft_getrevec( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_revec;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} un puntero al vector imaginario de la fft real.
+El usuario previamente habra tenido que calcular una fft.
+Este vector es interno y el usuario no debe borrarlo, aunque
+si puede modificarlo. En caso de calcular la fase de la transformada,
+el resultado se almacena en este mismo vector.
+Este vector tiene rfft_getvecnp() puntos, que encaja con el
+numero de puntos de la FFT divido por 2 y mas 1, y corresponde
+al rango 0 a PI (este ultimo inclusive) (en herzios, de 0 a
+frecuencia de muestreo entre 2) */
+
+PUBLIC SPL_pFLOAT XAPI rfft_getimvec( pRFFT r )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	return r->_imvec;
+}
+
+/**********************************************************/
+/* uso interno */
+
+PRIVATE SPL_VOID rfft_dofft( pRFFT r )
+{
+	SPL_INT n;
+	SPL_FLOAT factor;
+	assert(r!=NULL);
+
+	factor = r->_ufactor ? r->_ufactor : r->_ufactor0;
+	n = ((SPL_INT)1 << r->_nbits);
+
+	/* correccion 0-PI */
+	if ((r->_weight0pi) && (r->_inv!=FALSE) && (r->_ufactor==0)) {
+		r->_revec[r->_tinv[0]] *= 2;
+		r->_revec[r->_tinv[(SPL_INT)1 << (r->_nbits-1)]] *= 2;
+		/* la secuencia de puntos es: re[tinv[0]] im[tinv[0]]
+		re[tinv[1]] im[tinv[1]].... El punto PI es re[tinv[1<<(nbits-1)] */
+	}
+
+	fft_fft( r->_nbits,r->_inv,r->_revec,r->_imvec,r->_tsin,r->_tcos,
+			((r->_inv)?factor*2.0:factor));
+	fft_unscramble_cx_out(r->_revec,r->_imvec,n,r->_half_tsin,r->_inv);
+	r->_revec[n] = r->_imvec[0];
+	r->_imvec[0] = r->_imvec[n] = 0.0;
+
+	/* correccion 0-PI */
+	if ((r->_weight0pi) && (r->_inv==FALSE) && (r->_ufactor==0)) {
+		r->_revec[0] *= 0.5;
+		r->_revec[n] *= 0.5;
+	}
+}
+
+/**********************************************************/
+/* macro inmenso de uso interno */
+
+#define __rfft_rfft(r,invec)  \
+{  \
+	SPL_INT i, n2;  \
+	SPL_pINT tinv;  \
+	SPL_pFLOAT winv;  \
+	SPL_INT n = ((SPL_INT)1 << r->_nbits);  \
+	\
+	/*Scrambling & bit-inversion:*/  \
+	n2 = (r->_np) >> 1;  \
+	tinv = r->_tinv;  \
+	winv = r->_winvec;  \
+	if (r->_win!=XFFT_WIN_NONE) {  \
+		for (i=0; i<n2; i++) {  \
+			r->_revec[*tinv] = (*(invec++))*(*(winv++));  \
+			r->_imvec[*(tinv++)] = (*(invec++))*(*(winv++));  \
+		}  \
+		/* np impar */  \
+		if ((r->_np)&1) {  \
+			r->_revec[*tinv] = (*invec)*(*winv);  \
+			r->_imvec[*(tinv++)] = 0.0;  \
+			n2++;  \
+		}  \
+	}  \
+	else {  \
+		for (i=0; i<n2; i++) {  \
+			r->_revec[*tinv] = (*(invec++));  \
+			r->_imvec[*(tinv++)] = (*(invec++));  \
+		}  \
+		/* np impar */ \
+		if ((r->_np)&1) {  \
+			r->_revec[*tinv] = (*invec);  \
+			r->_imvec[*(tinv++)] = 0.0;  \
+			n2++;  \
+		}  \
+	}  \
+	for (i=n2; i<n; i++) {  \
+		r->_revec[*tinv] = 0.0;  \
+		r->_imvec[*(tinv++)] = 0.0;  \
+	}  \
+	rfft_dofft(r);  \
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier real para el vector
+real {invec}.
+Este vector debe tener rfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores rfft_getrevec()
+y rfft_getimvec() (parte real e imaginaria respectivamente, y
+solo en el rango 0 a PI).
+Esta funcion recibe el vector de entrada como array de valores
+de tipo SPL_FLOAT */
+
+PUBLIC SPL_VOID XAPI rfft_rfft( pRFFT r, SPL_pFLOAT invec )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	__rfft_rfft(r,invec);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier real para el vector
+real {invec}.
+Este vector debe tener rfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores rfft_getrevec()
+y rfft_getimvec() (parte real e imaginaria respectivamente, y
+solo en el rango 0 a PI).
+Esta funcion recibe el vector de entrada como array de valores
+de tipo SPL_INT */
+
+PUBLIC SPL_VOID XAPI rfft_rfft_i( pRFFT r, SPL_pINT invec )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	__rfft_rfft(r,invec);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier real para el vector
+real {invec}.
+Este vector debe tener rfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores rfft_getrevec()
+y rfft_getimvec() (parte real e imaginaria respectivamente, y
+solo en el rango 0 a PI).
+Esta funcion recibe el vector de entrada como array de valores
+de tipo INT16 */
+
+PUBLIC SPL_VOID XAPI rfft_rfft_i16( pRFFT r, pINT16 invec )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	__rfft_rfft(r,invec);
+}
+
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier real para el vector
+real {invec}.
+Este vector debe tener rfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores rfft_getrevec()
+y rfft_getimvec() (parte real e imaginaria respectivamente, y
+solo en el rango 0 a PI).
+Esta funcion recibe el vector de entrada como array de valores
+de tipo INT32 */
+
+PUBLIC SPL_VOID XAPI rfft_rfft_i32( pRFFT r, pINT32 invec )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	__rfft_rfft(r,invec);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier real para el vector
+real {invec}.
+Este vector debe tener rfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores rfft_getrevec()
+y rfft_getimvec() (parte real e imaginaria respectivamente, y
+solo en el rango 0 a PI).
+Esta funcion recibe el vector de entrada como array de valores
+de tipo UINT32 */
+
+PUBLIC SPL_VOID XAPI rfft_rfft_u32( pRFFT r, pUINT32 invec )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	__rfft_rfft(r,invec);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier real para el vector
+real {invec}.
+Este vector debe tener rfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores rfft_getrevec()
+y rfft_getimvec() (parte real e imaginaria respectivamente, y
+solo en el rango 0 a PI).
+Esta funcion recibe el vector de entrada como array de valores
+de tipo FLOAT32 */
+
+PUBLIC SPL_VOID XAPI rfft_rfft_f32( pRFFT r, pFLOAT32 invec )
+/*</DOC>*/
+{
+	assert(r!=NULL);
+
+	__rfft_rfft(r,invec);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula el modulo de la transformada.
+El resultado se mete en el vector de parte real (la parte real se
+pierde, y ya no se podra calcular la fase) */
+
+PUBLIC SPL_VOID XAPI rfft_mag( pRFFT r )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++)
+		r->_revec[i] = __fft_cx_mag(r->_revec[i],r->_imvec[i]);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula el modulo al cuadrado de la
+transformada.
+El resultado se mete en el vector de parte real (la parte real
+se pierde, y ya no se podra calcular la fase) */
+
+PUBLIC SPL_VOID XAPI rfft_norm( pRFFT r )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++)
+		r->_revec[i] = __fft_cx_norm(r->_revec[i],r->_imvec[i]);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula la fase de la transformada.
+El resultado se mete en el vector de parte imaginaria (la parte
+imaginaria se pierde, y ya no se podra calcular el modulo) */
+
+PUBLIC SPL_VOID XAPI rfft_arg( pRFFT r )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++)
+		r->_imvec[i] = fft_zcx_arg(r->_revec[i],r->_imvec[i]);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula el modulo y la fase de la
+transformada.
+El resultado se mete en el vector de parte real (modulo) y en
+el de parte imaginaria (fase) */
+
+PUBLIC SPL_VOID XAPI rfft_magarg( pRFFT r )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	SPL_FLOAT temp;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++) {
+		temp = r->_revec[i];
+		r->_revec[i] = __fft_cx_mag(temp,r->_imvec[i]);
+		r->_imvec[i] = fft_zcx_arg(temp,r->_imvec[i]);
+	}
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula el modulo al cuadrado
+y la fase de la transformada.
+El resultado se mete en el vector de parte real (modulo cuadrado)
+y en el de parte imaginaria (fase) */
+
+PUBLIC SPL_VOID XAPI rfft_normarg( pRFFT r )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	SPL_FLOAT temp;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++) {
+		temp = r->_revec[i];
+		r->_revec[i] = __fft_cx_norm(temp,r->_imvec[i]);
+		r->_imvec[i] = fft_zcx_arg(temp,r->_imvec[i]);
+	}
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT corrige los vectores
+real e imaginario para incorporar un retardo de {nTs} muestras
+al origen de fases (p.ej. algo asi como nTs=N/2 avanzaria el origen
+de fases al centro de la venana de analisis de N puntos; nTs puede
+ser un valor fraccionario).).
+No es mas que una fase lineal positiva.
+
+Esta funcion, solo debe utilizarse mientras se mantengan
+los vectores real e imag. Una vez calculado el modulo o fase,
+en vez de esta hay que usar rfft_trefmove_arg().
+
+Esta funcion es poco eficiente. El retardo de fase es mejor
+incorporarlo directamente sobre la fase con rfft_trefmove_arg().*/
+
+PUBLIC SPL_VOID XAPI rfft_trefmove_reim( pRFFT r, SPL_FLOAT nTs )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	SPL_FLOAT d, a, b;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++) {
+		d = (M_PI*i*nTs)/n;
+		a = cos(d);
+		b = sin(d);
+		d = r->_revec[i]*a - r->_imvec[i]*b;
+		r->_imvec[i] = r->_imvec[i]*a+r->_revec[i]*b;
+		r->_revec[i] = d;
+	}
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT y calculada la fase, corrige
+el vector de fase para incorporar un retardo de {nTs} muestras
+al origen de fases (p.ej. algo asi como nTs=N/2 avanzaria el origen
+de fases al centro de la ventana de analisis de N puntos; nTs puede
+ser un valor fraccionario).
+No es mas que una fase lineal positiva.
+
+Esta funcion, solo debe utilizarse una vez calculada la fase.
+Si se quiere incorporar el retardo antes, sobre los vectores real e
+imag se debe utilizar rfft_trefmove_reim().
+
+La fase resultante ya NO sera el valor principal de fase (entre
+-PI y PI). Si quieres el valor principal, usa rfft_trefmove_argm(),
+que es exactamentente igual que esta funcion, pero las fases
+se mantienen siempre entre -PI y PI. */
+
+PUBLIC SPL_VOID XAPI rfft_trefmove_arg( pRFFT r, SPL_FLOAT nTs )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++)
+		r->_imvec[i] += ((M_PI*i*nTs)/n);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Ver rfft_trefmove_arg(). */
+
+PUBLIC SPL_VOID XAPI rfft_trefmove_argm( pRFFT r, SPL_FLOAT nTs )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(r!=NULL);
+
+	n = ( (SPL_INT)1 << r->_nbits );
+	for (i = 0; i<=n; i++) {
+		SPL_FLOAT d=fmod(r->_imvec[i] + (M_PI*i*nTs)/n, (2*M_PI));
+		if (d>M_PI) d-= (2*M_PI);
+		else if (d<-M_PI) d+= (2*M_PI);
+		r->_imvec[i] = d;
+	}
+}
+
+/**********************************************************/
+
+

@@ -1,0 +1,156 @@
+/**********************************************************/
+/**********************************************************/
+
+           Libreria SPL para procesado de se¤al
+
+                  Version 1.1.3 (Feb. 97)
+
+        1994 - Grupo de Voz (DAET) ETSII/IT-Bilbao
+                     Borja Etxebarria
+
+
+/**********************************************************/
+/**********************************************************/
+
+
+Todos los modulos de extension .c y .h utilizan ANSI-C.
+Los modulos de extension .cpp y .hpp utilizan C++.
+
+
+Directorios y ficheros
+======================
+
+Arbol de directorios
+
+SOURCE\  ......... fuentes para compilar SPL
+SOURCE\CFG\  ..... fuentes a revisar/configurar para compilar SPL
+INCLUDE\  ........ cabeceras para usar/compilar librerias
+INCLUDE\CFG\  .... cabeceras a revisar/configurar para usar/compilar
+                   librerias
+
+
+Ficheros en INCLUDE\
+
+LPCROOTS.HPP .... Calculo de estadisticos de primer y segundo orden
+ZROOTS.HPP ...... Calculo de raices complejas
+STAT.H .......... Calculo de polos en analisis predictivo
+XFFT.H .......... Alto nivel: FFT compleja, real Cepstrum FFT-modulo
+CODEC.H ......... Codificadores
+SPL.H ........... Definicion de prototipos del resto de modulos SPL
+
+
+Ficheros en INCLUDE\CFG\
+
+TDEF.H .......... Definiciones de tipos generales
+SPLTDEF.H ....... Definiciones de tipos a usar por modulos SPL
+
+
+Ficheros en SOURCE\CFG
+
+_ALLOC.H ........ Definiciones para gestion de memoria dinamica.
+
+
+Ficheros en SOURCE\
+
+SPL0.C .......... Funciones de Bessel
+SPL1.C .......... Matrices y sistemas de ecuaciones
+SPL2.C .......... Ventanas de analisis
+SPL3.C .......... Cruces por cero, preenfasis, deenfasis
+SPL4.C .......... Correlacion y covarianza
+SPL5?.C ......... Prediccion lineal (SPL5a.C ... SPL5e.C)
+SPL6.C .......... Generacion de ruido pseudo-gaussiano
+SPL7.C .......... Filtros discretos
+SPL8?.C ......... Funciones para algoritmo FFT
+SPL9.C .......... Funciones para gestion de tramas
+SPL10.C ......... Cambios de unidades mas utilizados
+SPLI.H .......... Definiciones de uso interno por SPL?.C
+XFFT1.C ......... FFT compleja (alto nivel).
+XFFT2.C ......... FFT real (alto nivel).
+XFFT3.C ......... Cepstrum FFT-modulo (alto nivel).
+XFFT4.C ......... Coeficientes mel-cepstrum (alto nivel)
+_XFFT.H ......... Configuracion de modulos XFFT?.C
+STAT.C .......... Calculo de estadisticos de primer y segundo orden
+_STAT.H ......... Configuracion de modulo STAT.C
+ZROOTS.CPP ...... Calculo de raices complejas
+LPCROOTS.CPP .... Calculo de polos en analisis predictivo
+CODEC.C ......... Codecs de audio
+DLL.C ........... LibMain() para hacer DLL de MS-Windows
+VAD.C ........... Detección de actividad vocal por LTSE
+CBUFFER.C ....... Buffer circular de muestras (1D) y parámetros (2D)
+
+Notas sobre los fuentes
+=======================
+
+Las librerias de funciones SPL tienen como fichero fundamental de
+definiciones a SPL.H. En este fichero se definen todas las funciones
+utiles de los modulos SPL?.C
+
+
+El fichero SPL0.C solo contiene una funcion de Bessel, la unica
+que hacia falta (para la ventana de Kaiser).
+
+
+En SPL5.C aun faltan metodos de analisis predictivo (metodos
+de Burg, y lattice en general). Como este modulo es muy grande,
+esta dividido en varios SPL5?.C donde ?=A,B,C,D,E
+
+
+En SPL7.C solo se dise¤an filtros FIR por el metodo de las ventanas.
+Funcionan muy bien y tienen fase lineal, pero suelen ser filtros muy
+largos. Estaria muy bien a¤adir filtros IIR y FIR utilizando alguno de
+los otros muchos metodos de dise¤o...
+
+
+En SPL9.C hay funciones para gestionar conversion entre muestras,
+tramas, posicion de ventanas y tramas, etc.
+
+
+En XFFT.C y STAT.C se reserva memoria dinamica. Se utilizan las macros
+_malloc() y _free() definidas en SOURCE/CFG/_ALLOC.H, que estan por defecto
+mapeadas a malloc() y free(), pero pueden mapearse a otras que el
+usuario prefiera.
+
+
+En ZROOTS.CPP se pueden incorporar muchos otros metodos de busqueda
+de raices. El metodo de Laguerre falla con polinomios de orden
+muy elevado. En las NAG viene un algoritmo capaz de resolver
+practicamente cualquier polinomio. Esta en FORTRAN...
+
+
+Configuracion y compilacion
+===========================
+
+En INCLUDE\CFG\SPLTDEF.H se definen los tipos numericos fundamentales
+que se utilizan en los demas modulos (tipos SPL_INT, SPL_pINT,
+SPL_FLOAT, SPL_pFLOAT,...).
+
+En INCLUDE\CFG\SPLTDEF.HPP se definen tipos fundamentales adicionales
+utilizados en los modulos en C++ (tipos SPL_COMPLEX, SPL_pCOMPLEX).
+
+En SOURCE\CFG\_ALLOC.H se definen las funciones que deben utilizarse
+para reservar y liberar memoria dinamica. Solo los modulos XFFT?.C y
+STAT.C utilizan reserva directa de memoria dinamica. _ALLOC.H solo
+contiene macros que llaman directamente a malloc() y free(), pero
+se debe configurar para llamar a las funciones adecuadas.
+
+Por lo general, el usuario debera suministrar sus propios SPLTDEF.H,
+SPLTDEF.HPP y _ALLOC.H, basandose en los suministrados, y definir los
+tipos y gestionar la memoria dinamica de la forma que quiera. Por esta
+razon estos ficheros estan en un subdirectorio, de forma que no resulten
+directamente utilizables si no se le indica adecuadamente al compilador:
+(si se incluyen los directorios INCLUDE\CFG y SOURCE\CFG en la ruta de
+busqueda de ficheros #include, se usaran estos ficheros por defecto).
+(NOTA: esto ultimo ahora no es asi: el directorio SOURCE contiene YA
+versiones de estos ficheros!)
+
+
+Utilizacion de las librerias SPL compiladas
+===========================================
+
+Si se utiliza una libreria que incluya compilados los modulos SOURCE/*.C
+y SOURCE/*.CPP, tan solo seran necesarios (a parte de la libreria) los
+ficheros del directorio INCLUDE/*  e INCLUDE/CFG/* que se utilizaron al
+compilar la libreria (si se usan otros diferentes, habra problemas con
+los tipos de las variables).
+
+

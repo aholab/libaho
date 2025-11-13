@@ -1,0 +1,8 @@
+
+find src -name "*.[ch]*" -printf "misc/xdoc < %p > doc/%f.doc \n"|sh
+
+for i in doc/*; do 
+	if ! [ -s $i ]; then
+		rm $i;
+	fi;
+done;

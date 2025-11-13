@@ -1,0 +1,221 @@
+#ifndef __XFFT_H
+#define __XFFT_H
+
+/**********************************************************/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/*
+Copyright: 1994 - Grupo de Voz (DAET) ETSII/IT-Bilbao
+
+Nombre fuente................ XFFT.H
+Nombre paquete............... SPL
+Lenguaje fuente.............. C (Borland C/C++ 3.1)
+Estado....................... Completado
+Dependencia Hard/OS.......... -
+Codigo condicional........... -
+
+Codificacion................. Borja Etxebarria
+
+Version  dd/mm/aa  Autor     Proposito de la edicion
+-------  --------  --------  -----------------------
+1.4.0    02/01/97  Borja     nueva funcion: rfft_getwinvec()
+1.3.2    28/08/95  Borja     SPL_FLOAT32 --> FLOAT32
+1.3.1    30/07/95  Borja     TIPO SPL_PTR --> pTIPO
+1.3.0    08/12/94  Borja     revision general (tipos,idx,nel,tnel...)
+1.2.0    28/10/93  Borja     Soporte de diferentes tipos de enventanado.
+1.1.0    01/02/93  Borja     Calculo de cepstrum fft-modulo ('clase' cepfm).
+1.0.0    16/03/92  Borja     Codificacion inicial.
+
+======================== Contenido ========================
+Fichero de cabecera para las funciones de FFT de alto nivel.
+FFT compleja, real, y tambien cepstrum.
+Se utiliza memoria dinamica. Ver comentarios en XFFT.C acerca
+de esto.
+===========================================================
+*/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/**********************************************************/
+
+#include "spl.h"
+
+/**********************************************************/
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**********************************************************/
+/* codigos para funcion de enventanado */
+
+typedef enum {
+	XFFT_WIN_USER = -1,  /* funcion de enventanado definida por usuario */
+	XFFT_WIN_NONE = 0,   /* sin enventanado (ventana rectangular) */
+	XFFT_WIN_RECT = XFFT_WIN_NONE, /* sin enventanado (v. rectangular) */
+	XFFT_WIN_HAMM,    /* ventana de hamming */
+	XFFT_WIN_HANN,    /* ventana de hanning */
+	XFFT_WIN_BART,    /* ventana de bartlett */
+	XFFT_WIN_BLACK,   /* ventana de blackman */
+	XFFT_WIN_KAIS5,   /* ventana de kaiser, con beta=5 */
+	XFFT_WIN_KAIS6,   /* ventana de kaiser, con beta=6 */
+	XFFT_WIN_KAIS7,   /* ventana de kaiser, con beta=7 */
+	XFFT_WIN_KAIS8,   /* ventana de kaiser, con beta=8 */
+	XFFT_WIN_KAIS9,   /* ventana de kaiser, con beta=9 */
+	XFFT_WIN_KAIS10   /* ventana de kaiser, con beta=10 */
+} XFFT_WIN;
+
+
+/* definicion de la funcion de enventanado. Si el usuario suministra
+una funcion de enventanado propia (XFFT_WIN_USER), debe cumplir esta
+definicion.
+
+.      SPL_pFLOAT mi_funcion( SPL_pFLOAT v, SPL_INT N )
+
+Funcion que recibe 2 parametros: El primero, puntero SPL_pFLOAT {v}
+(puntero a un vector de elementos de tipo SPL_FLOAT). El segundo,
+valor SPL_INT {N} (entero) que indica la longitud del vector anterior. La
+funcion debe rellenar el vector {v} con los {N} valores de forman
+una ventana de longitud {N}. Ademas la funcion {devuelve} el propio
+puntero {v} */
+
+typedef SPL_pFLOAT (* XFFT_WIN_FUNC)( SPL_pFLOAT v, SPL_INT N );
+
+/**********************************************************/
+/* estructura "objeto" para FFT compleja */
+
+typedef struct _CFFT {
+	SPL_INT _nbits;
+	SPL_pFLOAT _revec, _imvec;
+	SPL_pINT _tinv;
+	SPL_pFLOAT _tsin, _tcos;
+	SPL_BOOL _inv;
+	SPL_FLOAT _ufactor;
+
+	SPL_INT _np;
+} CFFT, SPL_PTR pCFFT;
+
+
+/* estructura para FFT real */
+
+typedef struct _RFFT {
+	SPL_INT _nbits;
+	SPL_pFLOAT _revec, _imvec;
+	SPL_pINT _tinv;
+	SPL_pFLOAT _half_tsin, _tsin, _tcos;
+	SPL_BOOL _inv, _weight0pi;
+	SPL_FLOAT _ufactor, _ufactor0, _winmean;
+
+	SPL_INT _np;
+	XFFT_WIN _win, _owin;
+	XFFT_WIN_FUNC _winfunc;
+	SPL_pFLOAT _winvec;
+} RFFT, SPL_PTR pRFFT;
+
+
+/* estructura para calculo de cepstrum FFT-modulo */
+
+typedef struct _CEPFM {
+	pRFFT _r1;
+	pRFFT _r2;
+	SPL_pFLOAT _tmp;
+} CEPFM, SPL_PTR pCEPFM;
+
+/**********************************************************/
+/* metodos de fft compleja */
+
+pCFFT API cfft_construct( SPL_INT np, SPL_INT fftnp,
+		SPL_BOOL inv, SPL_FLOAT ufactor );
+SPL_VOID API cfft_destruct( pCFFT c );
+SPL_VOID API cfft_setnp( pCFFT c, SPL_INT np );
+SPL_VOID API cfft_setinv( pCFFT c, SPL_BOOL inv );
+SPL_VOID API cfft_setufactor( pCFFT c, SPL_FLOAT ufactor );
+SPL_INT API cfft_getnp( pCFFT c );
+SPL_INT API cfft_getfftnp( pCFFT c );
+SPL_INT API cfft_getvecnp( pCFFT c );
+SPL_BOOL API cfft_getinv( pCFFT c );
+SPL_FLOAT API cfft_getufactor( pCFFT c );
+SPL_pFLOAT API cfft_getrevec( pCFFT c );
+SPL_pFLOAT API cfft_getimvec( pCFFT c );
+SPL_VOID API cfft_cfft( pCFFT c, SPL_pFLOAT re_invec, SPL_pFLOAT im_invec );
+SPL_VOID API cfft_norm( pCFFT c );
+SPL_VOID API cfft_mag( pCFFT c );
+SPL_VOID API cfft_arg( pCFFT c );
+SPL_VOID API cfft_normarg( pCFFT c );
+SPL_VOID API cfft_magarg( pCFFT c );
+SPL_VOID API cfft_trefmove_reim( pCFFT c, SPL_FLOAT nTs );
+SPL_VOID API cfft_trefmove_arg( pCFFT c, SPL_FLOAT nTs );
+SPL_VOID API cfft_trefmove_argm( pCFFT c, SPL_FLOAT nTs );
+#define cfft_getnormvec(c)  cfft_getrevec(c)
+#define cfft_getmagvec(c)  cfft_getrevec(c)
+#define cfft_getargvec(c)  cfft_getimvec(c)
+
+/**********************************************************/
+/* metodos de fft real */
+
+pRFFT API rfft_construct( SPL_INT np, SPL_INT fftnp, SPL_BOOL inv, SPL_FLOAT ufactor,
+		XFFT_WIN win, XFFT_WIN_FUNC winfunc );
+SPL_VOID API rfft_destruct( pRFFT r );
+SPL_BOOL API rfft_setwin( pRFFT r, XFFT_WIN win, XFFT_WIN_FUNC winfunc );
+SPL_BOOL API rfft_setnp( pRFFT r, SPL_INT np );
+SPL_BOOL API rfft_setnpwin( pRFFT r, SPL_INT np, XFFT_WIN win, XFFT_WIN_FUNC winfunc );
+SPL_VOID API rfft_setinv( pRFFT r, SPL_BOOL inv );
+SPL_VOID API rfft_setufactor( pRFFT r, SPL_FLOAT ufactor );
+SPL_VOID API rfft_set0piweight( pRFFT r, SPL_BOOL weight );
+SPL_BOOL API rfft_get0piweight( pRFFT r );
+SPL_INT API rfft_getnp( pRFFT r );
+SPL_INT API rfft_getfftnp( pRFFT r );
+SPL_INT API rfft_getvecnp( pRFFT r );
+XFFT_WIN API rfft_getwin( pRFFT r );
+SPL_pFLOAT API rfft_getwinvec( pRFFT r );
+XFFT_WIN_FUNC API rfft_getwinfunc( pRFFT r );
+SPL_BOOL API rfft_getinv( pRFFT r );
+SPL_FLOAT API rfft_getufactor( pRFFT r );
+SPL_pFLOAT API rfft_getrevec( pRFFT r );
+SPL_pFLOAT API rfft_getimvec( pRFFT r );
+SPL_VOID API rfft_rfft( pRFFT r, SPL_pFLOAT invec );
+SPL_VOID API rfft_rfft_i( pRFFT r, SPL_pINT invec );
+SPL_VOID API rfft_rfft_i16( pRFFT r, pINT16 invec );
+SPL_VOID API rfft_rfft_f32( pRFFT r, pFLOAT32 invec );
+SPL_VOID API rfft_rfft_i32( pRFFT r, pINT32 invec );
+SPL_VOID API rfft_rfft_u32( pRFFT r, pUINT32 invec );
+SPL_VOID API rfft_norm( pRFFT r );
+SPL_VOID API rfft_mag( pRFFT r );
+SPL_VOID API rfft_arg( pRFFT r );
+SPL_VOID API rfft_normarg( pRFFT r );
+SPL_VOID API rfft_magarg( pRFFT r );
+SPL_VOID API rfft_trefmove_reim( pRFFT r, SPL_FLOAT nTs );
+SPL_VOID API rfft_trefmove_arg( pRFFT r, SPL_FLOAT nTs );
+SPL_VOID API rfft_trefmove_argm( pRFFT r, SPL_FLOAT nTs );
+#define rfft_getnormvec(r)  rfft_getrevec(r)
+#define rfft_getmagvec(r)  rfft_getrevec(r)
+#define rfft_getargvec(r)  rfft_getimvec(r)
+
+/**********************************************************/
+/* metodos de cepstrum */
+
+pCEPFM API cepfm_construct( SPL_INT np, SPL_INT ifftnp, SPL_FLOAT ufactor,
+		XFFT_WIN win, XFFT_WIN_FUNC winfunc );
+SPL_VOID API cepfm_destruct( pCEPFM c );
+SPL_BOOL API cepfm_setwin( pCEPFM c, XFFT_WIN win, XFFT_WIN_FUNC winfunc );
+SPL_BOOL API cepfm_setnp( pCEPFM c, SPL_INT np );
+SPL_BOOL API cepfm_setnpwin( pCEPFM c, SPL_INT np, XFFT_WIN win, XFFT_WIN_FUNC winfunc );
+SPL_VOID API cepfm_setufactor( pCEPFM c, SPL_FLOAT ufactor );
+SPL_INT API cepfm_getnp( pCEPFM c );
+SPL_INT API cepfm_getcepnp( pCEPFM c );
+XFFT_WIN API cepfm_getwin( pCEPFM c );
+XFFT_WIN_FUNC API cepfm_getwinfunc( pCEPFM c );
+SPL_FLOAT API cepfm_getufactor( pCEPFM c );
+SPL_VOID API cepfm_cepfm( pCEPFM c, SPL_pFLOAT invec );
+SPL_VOID API cepfm_cepfm_i( pCEPFM c, SPL_pINT invec );
+SPL_VOID API cepfm_cepfm_i16( pCEPFM c, pINT16 invec );
+SPL_VOID API cepfm_cepfm_f32( pCEPFM c, pFLOAT32 invec );
+SPL_pFLOAT API cepfm_getcepfm( pCEPFM c );
+
+/**********************************************************/
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
+
+/**********************************************************/
+
+#endif
+

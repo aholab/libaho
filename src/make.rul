@@ -1,0 +1,84 @@
+# make rules to compile a library file.
+
+######################################
+# makefile template to use with this make.rul file:
+
+# SOURCES=source.cpp
+# LIBNAME=libname.a
+# #DEBUG=y
+# INCLUDES=-Imy/dir
+# FLAGS=
+# BITS32=n
+# include make.rul
+
+# end of makefile template
+######################################
+
+# default include directories
+DEFINCLUDES=
+
+######################################
+
+# select flags depending on DEBUG value
+ifeq ($(DEBUG),y)
+OPTFLAGS=-g
+else
+OPTFLAGS=-O6 -DNDEBUG
+endif 
+
+#select 32 o 64 bits
+ifeq ($(BITS32),y)
+BITSFLAGS=-m32
+else
+BITSFLAGS=-m64
+endif
+
+# detect and configure platform
+UNIXNAME=$(shell uname)
+ARCHFLAG=-D$(UNIXNAME)
+
+# compiler config
+CPPFLAGS=$(INCLUDES) $(DEFINCLUDES) $(ARCHFLAG) $(BITSFLAGS)
+CXXFLAGS=-Wall $(OPTFLAGS) $(FLAGS)
+CC=g++
+CFLAGS=$(CXXFLAGS) $(BITSFLAGS)
+LDLIBS= $(XLIBS) $(DEFLIBS) $(LIBS)
+
+# generate .o list from .c .cpp .cc .C source list
+TMP1=$(SOURCES:.c=.o)
+TMP2=$(TMP1:.cpp=.o)
+TMP3=$(TMP2:.cc=.o)
+OBJS=$(TMP3:.C=.o)
+
+# default target
+all: obj
+
+# generate .o files
+obj: $(OBJS)
+
+# generate library
+lib: $(patsubst %,$(LIBNAME)(%),$(OBJS)) 
+
+# strip MSDOS CR-LF from source files
+toux:
+	tounix *.c* *.h*
+
+# clean temporary files
+clean:
+	@echo $(OBJS) $(LIBNAME) .depend
+	@rm -f $(OBJS) $(LIBNAME) .depend
+
+# include dependencies if exist
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif
+
+# target: create dependencies
+depend: 
+	$(CXX) $(CPPFLAGS) -MM $(SOURCES) > .depend
+
+# compile rule for .cpp files
+.SUFFIXES: .cpp
+.cpp.o:
+	$(COMPILE.cc) $< $(OUTPUT_OPTION)
+

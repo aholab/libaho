@@ -1,0 +1,23 @@
+#/bin/sh
+
+#Filtro para ordenar registro xmalloc/xfree() generado en el fichero
+#xalloc.log cuando se activa el debuger xalloc_logf(1). Enfrenta
+#cada malloc con su correspondiente free.
+
+
+
+grep "\$M" xalloc.log > /tmp/xalloc.m
+grep "\$F" xalloc.log > /tmp/xalloc.f
+tounix /tmp/xalloc.m /tmp/xalloc.f> /dev/null
+txtchange "\\\\" "\/" /tmp/xalloc.m  /tmp/xalloc.f > /dev/null
+
+export IFS="M "
+cat /tmp/xalloc.m | (  while read PRE N RESTO; do  
+	FRE=`grep "\$F$N" /tmp/xalloc.f`
+	echo "${PRE}M${N} ${RESTO} ---- $FRE"
+done;
+)
+
+
+rm /tmp/xalloc.m
+rm /tmp/xalloc.f

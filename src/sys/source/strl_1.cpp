@@ -1,0 +1,94 @@
+/**********************************************************/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/*
+Copyright: 1996 - Grupo de Voz (DET) ETSII/IT-Bilbao
+
+Nombre fuente................ STRL.CPP
+Nombre paquete............... -
+Lenguaje fuente.............. C++
+Estado....................... Completado
+Dependencia Hard/OS.......... -
+Codigo condicional........... -
+
+Codificacion................. Borja Etxebarria
+
+Version  dd/mm/aa  Autor     Comentario
+-------  --------  --------  ----------
+1.2.5    30/08/98  Borja     split en varios modulos strl_?.cpp
+
+======================== Contenido ========================
+Ver strl.cpp para doc.
+===========================================================
+*/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/**********************************************************/
+
+#include "strl.hpp"
+#include "uti.h"
+
+/**********************************************************/
+
+INT _strl_cmp(const String *s1, const String *s2);
+INT _strl_rcmp(const String *s1, const String *s2);
+
+/**********************************************************/
+
+VOID StrSet::add_s(const char *words )
+{
+	StrList l(words);
+	add_mv(l,FALSE);
+}
+
+/**********************************************************/
+
+VOID StrSet::add_sf(const char *fwords, ... )
+{
+	va_list v;
+	va_start(v,fwords);
+	add_s(fwords,v);
+	va_end(v);
+}
+
+/**********************************************************/
+
+VOID StrSet::add_s(const char *fwords, va_list v )
+{
+	StrList l(fwords,v);
+	add_mv(l,FALSE);
+}
+
+/**********************************************************/
+
+VOID StrSet::add_s( const char *wordarray[] )
+{
+	StrList l(wordarray);
+	add_mv(l,FALSE);
+}
+
+/**********************************************************/
+
+VOID StrSet::sort( BOOL reverse )
+{
+	if (reverse) sortf(_strl_rcmp);
+	else sortf(_strl_cmp);
+}
+
+/**********************************************************/
+
+BOOL StrSet::OK ( VOID ) const
+{
+	if (!(l.OK())) return FALSE;
+	for (Lix p=first(); p!=0; p=next(p)) if (!item(p).OK()) return FALSE;
+	return TRUE;
+}
+
+/**********************************************************/
+
+std::ostream& operator << (std::ostream &st, const StrSet &l)
+{
+	for (Lix p=l.first(); p!=0; p=l.next(p))
+		st<< "\"" << l(p) << "\"" << std::endl;
+	return st;
+}
+
+/**********************************************************/

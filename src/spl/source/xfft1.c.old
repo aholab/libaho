@@ -1,0 +1,544 @@
+/**********************************************************/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/*
+Copyright: 1994 - Grupo de Voz (DAET) ETSII/IT-Bilbao
+
+Nombre fuente................ XFFT1.C
+Nombre paquete............... SPL
+Lenguaje fuente.............. C (Borland C/C++ 3.1)
+Estado....................... Completado
+Dependencia Hard/OS.......... -
+Codigo condicional........... NDEBUG
+
+Codificacion................. Borja Etxebarria
+
+Version  dd/mm/aa  Autor     Proposito de la edicion
+-------  --------  --------  -----------------------
+1.3.2    10/01/97  Borja     algunos comentarios
+1.3.1    30/07/95  Borja     scope funciones explicito
+1.3.0    08/12/94  Borja     revision general (tipos,idx,nel,tnel...)
+1.2.1    14/03/94  Borja     bug: cepfm_getceps() --> cepfm_getcepfm()
+1.2.0    28/10/93  Borja     Soporte de diferentes tipos de enventanado.
+1.1.0    01/02/93  Borja     Calculo de cepstrum fft-modulo ('clase' cepfm).
+1.0.0    16/03/92  Borja     Codificacion inicial.
+
+======================== Contenido ========================
+<DOC>
+Funciones para el calculo eficiente y reiterado de FFT compleja.
+
+NOTA: Para la reserva de memoria dinamica se han definido
+en _XFFTX.H dos macros: xfft_malloc() y xfft_free(), que mapean
+a las funciones _malloc() y _free(), definidas en _ALLOC.H.
+
+Hay varios bloques de funciones, cada una formando una 'clase':
+
+- cfft : FFT de funciones complejas
+- rfft : FFT de funciones reales
+- cepfm : Calculo de los cepstrum-FFT-modulo
+
+Las funciones estan organizadas segun los bloques indicados.
+Estan programadas en C estandar utilizando 'handlers', siguiendo
+una estructura proxima a la programacion orientada a objetos C++.
+Para cada 'clase' (cfft_???(), rfft_???(), cepfm_???()) hay una funcion
+constructora (???_construct()) que crea y devuelve un puntero a una
+estructura (CFFT, RFFT, CEPFM) de la que no es necesario conocer
+nada externamente. El resto de las funciones tienen siempre como
+primer parametro este puntero.
+Despues del uso, la estructura debe destruirse mediante la funcion
+???_destruct() que libera toda la memoria reservada. El sistema es
+similar al utilizado por las librerias de ficheros del C (estructura
+FILE y funciones fopen(), fread(), fclose()...). Al crear la estructura
+(???_construct()) se debe reservar memoria dinamica. Si no es posible el
+constructor devuelve un puntero a NULL. En otras funciones distintas del
+constructor que tambien impliquen gestion dinamica de memoria, se
+{devuelve} un valor booleano (SPL_BOOL) de valor SPL_TRUE si el proceso
+se realiza correctamente, o SPL_FALSE si no se puede completar.
+
+Estos juegos de funciones son adecuados cuando se quiera efectuar
+FFT repetidamente. Primero se construye la estructura adecuada con
+la funcion ???_construct(), se realizan todas las FFT que se quiera
+y finalmente se destruye la estructura con ???_destruct(). La
+estructura almacena informacion reutilizable en todas las FFT que
+queramos efectuar (tablas de senos y cosenos, funcion de
+enventanado...) acelerando el proceso de calculo al no tener que
+calcular esta informacion en cada FFT.
+
+Definir NDEBUG para desconectar la validacion de parametros
+con assert(). No definir este simbolo mientras se depuren
+aplicaciones, ya que aunque las funciones son algo mas lentas,
+el chequeo de validacion de parametros resuelve muchos problemas.
+</DOC>
+===========================================================
+*/
+/*/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
+/**********************************************************/
+
+#include "_xfft.h"
+
+/*<DOC>*/
+/**********************************************************/
+/* FFT compleja. Funcion constructora de la estructura.
+
+Recibe como parametros:
+- SPL_INT {np} : Numero de puntos de los vectores de datos (complejos)
+.                de los que queremos calcular la FFT.
+.                {np}>0, y no tiene por que ser una potencia de 2 (relleno
+.                automatico con ceros, pero ojo, no en PI sino en 2PI!!!.
+.                tal vez habria que corregir esto....).
+
+- SPL_INT {fftnp} : Numero de puntos de la FFT.
+.                   Si este parametro es cero, se utiliza la menor potencia
+.                   de dos superior o igual a {np}.
+.                   Si este valor no es cero, se utiliza la menor potencia
+.                   de dos superior o igual a {fftnp}. En caso de que {np}
+.                   sea menor que {fftnp}, se utilizaran solo {fftnp} puntos
+.                   de los vectores de datos.
+.                   {fftnp}>=0, y no tiene porque ser potencia de 2.
+
+- SPL_BOOL {inv} : SPL_FALSE (o FFT_DIRECT) para efectuar FFT directa.
+.                  SPL_TRUE (o FFT_INVERSE) para efectuar FFT inversa.
+
+- SPL_FLOAT {ufactor} : factor de escalado. Multiplica al resultado
+.                        de la FFT directa, o divide al resultado
+.                        si es una FFT inversa. Por lo general este
+.                        factor es 1 (sin escalado).
+
+La funcion {devuelve} un puntero a una estructura, que debera utilizarse
+como primer parametro para el resto de las funciones cfft_???().
+Si no es posible crear la estructura, la funcion {devuelve} NULL. */
+
+PUBLIC pCFFT XAPI cfft_construct( SPL_INT np, SPL_INT fftnp,
+		SPL_BOOL inv, SPL_FLOAT ufactor )
+/*</DOC>*/
+{
+	pCFFT c;
+	SPL_INT n, n2;
+	assert(np>0);
+	assert(fftnp>=0);
+
+	c = (pCFFT)xfft_malloc(sizeof(CFFT));
+	if (c!=NULL) {
+		c->_nbits = fft_n_bits((fftnp>0) ? fftnp : np);
+		n2 = ( (n = (SPL_INT)1 << c->_nbits) >> 1 );
+
+		c->_revec = (SPL_pFLOAT)xfft_malloc(sizeof(SPL_FLOAT)*n);
+		c->_imvec = (SPL_pFLOAT)xfft_malloc(sizeof(SPL_FLOAT)*n);
+		c->_tinv = (SPL_pINT)xfft_malloc(sizeof(SPL_INT)*n);
+		c->_tsin = (SPL_pFLOAT)xfft_malloc(sizeof(SPL_FLOAT)*n2);
+		c->_tcos = (SPL_pFLOAT)xfft_malloc(sizeof(SPL_FLOAT)*n2);
+
+		if ((((n!=0)&&((c->_revec==NULL)||(c->_imvec==NULL)||
+				(c->_tinv==NULL)))|| ((n2!=0)&&
+				((c->_tsin==NULL)||(c->_tcos==NULL))))==0) {
+			fft_fill_tinv(c->_tinv,n);
+			if (n2)
+				fft_fill_tsin_tcos(c->_tsin,c->_tcos,n2);
+			c->_inv = inv;
+			c->_ufactor = ufactor;
+			c->_np = ( (np>n) ? n : np );
+		}
+		else {
+			cfft_destruct(c);
+			c=NULL;
+		}
+	}
+
+	return c;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* destructor para una estructura pCFFT */
+
+PUBLIC SPL_VOID XAPI cfft_destruct( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	if (c->_revec!=NULL)
+		xfft_free(c->_revec);
+	if (c->_imvec!=NULL)
+		xfft_free(c->_imvec);
+	if (c->_tinv!=NULL)
+		xfft_free(c->_tinv);
+	if (c->_tsin!=NULL)
+		xfft_free(c->_tsin);
+	if (c->_tcos!=NULL)
+		xfft_free(c->_tcos);
+	xfft_free(c);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica el numero de puntos de los vectores de los que se
+quiere calcular la fft compleja, indicando que los vectores
+tendran {np} puntos. Si {np} es mayor que el numero de puntos de la
+FFT, {np} se trunca al valor del numero de puntos de la FFT.
+{np}>0.
+*/
+
+PUBLIC SPL_VOID XAPI cfft_setnp( pCFFT c, SPL_INT np )
+/*</DOC>*/
+{
+	SPL_INT n;
+	assert(c!=NULL);
+	assert(np>0);
+
+	n = ((SPL_INT)1 << (c->_nbits));
+
+	c->_np = ((np>n) ? n : np );
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica FFT inversa / FFT directa  en la FFT compleja */
+
+PUBLIC SPL_VOID XAPI cfft_setinv( pCFFT c, SPL_BOOL inv )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	c->_inv = inv;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* modifica el factor de usuario en la FFT compleja.
+Este factor multiplica en la FFT directa, y divide en la inversa. */
+
+PUBLIC SPL_VOID XAPI cfft_setufactor( pCFFT c, SPL_FLOAT ufactor )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	c->_ufactor = ufactor;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el numero de puntos que deben tener los vectores
+de datos de los que se quiere calcular la FFT compleja (longitud
+minima de los vectores que debe enviar el usuario) */
+
+PUBLIC SPL_INT XAPI cfft_getnp( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return c->_np;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el numero de puntos que utiliza la FFT compleja
+(potencia de dos utilizada) */
+
+PUBLIC SPL_INT XAPI cfft_getfftnp( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return ((SPL_INT)1 << (c->_nbits));
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el numero de puntos de los vectores resultado
+de la FFT compleja. Encaja con cfft_getfftnp() */
+
+PUBLIC SPL_INT XAPI cfft_getvecnp( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return ((SPL_INT)1 << (c->_nbits));
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} si se esta calculando una FFT compleja directa o inversa */
+
+PUBLIC SPL_BOOL XAPI cfft_getinv( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return c->_inv;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} el factor de usuario */
+
+PUBLIC SPL_FLOAT XAPI cfft_getufactor( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return c->_ufactor;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} un puntero al vector real de la fft compleja.
+El usuario previamente habra tenido que calcular una fft.
+Este vector es interno y el usuario no debe borrarlo, aunque
+si puede modificarlo. En caso de calcular el modulo o el modulo al
+cuadrado (norma) de la transformada, el resultado se almacena en
+este mismo vector.
+Este vector tiene cfft_getvecnp() puntos, que encaja con el
+numero de puntos de la FFT, y corresponde al rango 0 a 2*PI
+(de 0 a la frecuencia de muestreo) */
+
+PUBLIC SPL_pFLOAT XAPI cfft_getrevec( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return c->_revec;
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* {devuelve} un puntero al vector imaginario de la fft compleja.
+El usuario previamente habra tenido que calcular una fft.
+Este vector es interno y el usuario no debe borrarlo, aunque
+si puede modificarlo. En caso de calcular la fase de la transformada,
+el resultado se almacena en este mismo vector.
+Este vector tiene cfft_getvecnp() puntos, que encaja con el
+numero de puntos de la FFT, y corresponde al rango 0 a 2*PI
+(de 0 a frecuencia de muestreo) */
+
+PUBLIC SPL_pFLOAT XAPI cfft_getimvec( pCFFT c )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	return c->_imvec;
+}
+
+/**********************************************************/
+/* macro de uso interno */
+
+#define __cfft_cfft(c,re_invec,im_invec)  \
+{  \
+	SPL_INT i, n;  \
+	SPL_pINT tinv;  \
+	\
+	n = ((SPL_INT)1 << c->_nbits);  \
+	tinv = c->_tinv; \
+	/* inversion de bits */  \
+	for (i=0; i<c->_np; i++) {	\
+		c->_revec[*tinv] = (*(re_invec++));  \
+		c->_imvec[*(tinv++)] = (*(im_invec++));  \
+	} \
+	/* cero padding */	\
+	for (i=c->_np; i<n; i++) {	\
+		c->_revec[*tinv] = 0.0;  \
+		c->_imvec[*(tinv++)] = 0.0;  \
+	}  \
+	fft_fft(c->_nbits,c->_inv,c->_revec,c->_imvec,c->_tsin,  \
+			c->_tcos,c->_ufactor); \
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* calcula la transformada de fourier compleja para el vector
+complejo de parte real {re_invec} y parte imaginaria {im_invec}.
+Estos dos vectores deben tener cfft_getnp() puntos.
+El resultado de la fft se almacena en los vectores cfft_getrevec()
+y cfft_getimvec() (parte real e imaginaria respectivamente). */
+
+PUBLIC SPL_VOID XAPI cfft_cfft( pCFFT c,
+		SPL_pFLOAT re_invec, SPL_pFLOAT im_invec )
+/*</DOC>*/
+{
+	assert(c!=NULL);
+
+	__cfft_cfft(c,re_invec,im_invec);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT (con cfff_fft_?()) calcula el modulo
+de la transformada.
+El resultado se mete en el vector de parte real (cfft_getrevec()).
+Nota: Una vez llamada esta funcion, se pierde la parte real,
+por lo que no se puede calcular la fase. */
+
+PUBLIC SPL_VOID XAPI cfft_mag( pCFFT c )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++)
+		c->_revec[i] = __fft_cx_mag(c->_revec[i],c->_imvec[i]);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT (con cfft_fft_?() calcula el modulo al
+cuadrado de la transformada (norma).
+El resultado se mete en el vector de parte real (cfft_getrevec()).
+Nota: Una vez llamada esta funcion, se pierde la parte real, por
+lo que no se puede calcular la fase */
+
+PUBLIC SPL_VOID XAPI cfft_norm( pCFFT c )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++)
+		c->_revec[i] = __fft_cx_norm(c->_revec[i],c->_imvec[i]);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula la fase de la transformada.
+El resultado se mete en el vector de parte imaginaria (cfft_getimvec()).
+Nota: Una vez llamada esta funcion se pierde la parte imaginaria, por
+lo que no se puede calcular el modulo */
+
+PUBLIC SPL_VOID XAPI cfft_arg( pCFFT c )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++)
+		c->_imvec[i] = fft_zcx_arg(c->_revec[i],c->_imvec[i]);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula el modulo y la fase de la
+transformada.
+El resultado se mete en el vector de parte real (modulo) y en
+el de parte imaginaria (fase) */
+
+PUBLIC SPL_VOID XAPI cfft_magarg( pCFFT c )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	SPL_FLOAT temp;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++) {
+		temp = c->_revec[i];
+		c->_revec[i] = __fft_cx_mag(temp,c->_imvec[i]);
+		c->_imvec[i] = fft_zcx_arg(temp,c->_imvec[i]);
+	}
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT calcula el modulo al cuadrado
+y la fase de la transformada.
+El resultado se mete en el vector de parte real (modulo cuadrado)
+y en el de parte imaginaria (fase) */
+
+PUBLIC SPL_VOID XAPI cfft_normarg( pCFFT c )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	SPL_FLOAT temp;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++) {
+		temp = c->_revec[i];
+		c->_revec[i] = __fft_cx_norm(temp,c->_imvec[i]);
+		c->_imvec[i] = fft_zcx_arg(temp,c->_imvec[i]);
+	}
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT corrige los vectores
+real e imaginario para incorporar un retardo de {nTs} muestras
+al origen de fases (p.ej. algo asi como nTs=N/2 avanzaria el origen
+de fases al centro de la venana de analisis de N puntos; nTs puede
+ser un valor fraccionario).).
+No es mas que una fase lineal positiva.
+
+Esta funcion, solo debe utilizarse mientras se mantengan
+los vectores real e imag. Una vez calculado el modulo o fase,
+en vez de esta hay que usar cfft_trefmove_arg().
+
+Esta funcion es poco eficiente. El retardo de fase es mejor
+incorporarlo directamente sobre la fase con cfft_trefmove_arg().*/
+
+PUBLIC SPL_VOID XAPI cfft_trefmove_reim( pCFFT c, SPL_FLOAT nTs )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	SPL_FLOAT d, a, b;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++) {
+		d = (2*M_PI*i*nTs)/n;
+		a = cos(d);
+		b = sin(d);
+		d = c->_revec[i]*a - c->_imvec[i]*b;
+		c->_imvec[i] = c->_imvec[i]*a+c->_revec[i]*b;
+		c->_revec[i] = d;
+	}
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Una vez efectuada una FFT y calculada la fase, corrige
+el vector de fase para incorporar un retardo de {nTs} muestras
+al origen de fases (p.ej. algo asi como nTs=N/2 avanzaria el origen
+de fases al centro de la ventana de analisis de N puntos; nTs puede
+ser un valor fraccionario).
+No es mas que una fase lineal positiva.
+
+Esta funcion, solo debe utilizarse una vez calculada la fase.
+Si se quiere incorporar el retardo antes, sobre los vectores real e
+imag se debe utilizar cfft_trefmove_reim().
+
+La fase resultante ya NO sera el valor principal de fase (entre
+-PI y PI). Si quieres el valor principal, usa cfft_trefmove_argm(),
+que es exactamentente igual que esta funcion, pero las fases
+se mantienen siempre entre -PI y PI. */
+
+PUBLIC SPL_VOID XAPI cfft_trefmove_arg( pCFFT c, SPL_FLOAT nTs )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++)
+		c->_imvec[i] += ((2*M_PI*i*nTs)/n);
+}
+
+/*<DOC>*/
+/**********************************************************/
+/* Ver cfft_trefmove_arg(). */
+
+PUBLIC SPL_VOID XAPI cfft_trefmove_argm( pCFFT c, SPL_FLOAT nTs )
+/*</DOC>*/
+{
+	SPL_INT i, n;
+	assert(c!=NULL);
+
+	n = ( (SPL_INT)1 << c->_nbits );
+	for (i = 0; i<n; i++) {
+		SPL_FLOAT d=fmod(c->_imvec[i] + ((2*M_PI)*i*nTs)/n, (2*M_PI));
+		if (d>M_PI) d-= (2*M_PI);
+		else if (d<-M_PI) d+= (2*M_PI);
+		c->_imvec[i] = d;
+	}
+}
+
+/**********************************************************/
+

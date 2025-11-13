@@ -1,0 +1,54 @@
+make libd
+make lib
+  para compilar la libreria (de debugeo o la optimizada). Hacer make clean
+  entre una y otra!.
+
+make includes
+  rellena el directorio include
+
+make depend
+  crea dependencias (solo necesarias si vas a enredar en los fuentes)
+
+make clean
+  quita .o (pero no el lib ni los includes)
+
+make cleanall
+  quita todo lo quitable
+
+make toux
+  msdos->unix. ejecutarlo antes de compilar si hay errores de compilacion!
+
+libdos
+en libdos hay prj para el borland 3.1.
+los directorios de includes que hay debajo de este directorio
+tambien se rellenan al hacer el make includes
+
+
+Notas:
+-----------------
+Por alguna razon, la clase String (string.hpp) a veeces produce memory leaks
+en el fichero mark.cpp. Se soluciona desactivando la expansion de funciones
+inline en dicho fichero.  El leak se puede comprobar abriendo y cerrando de
+la misma un fichero de audio con marcas, utilizando la clase CAudioFile.
+Programa de test para MSDOS:
+
+#include <stdlib.h>
+#include "caudio.hpp"
+#include "alloc.h"
+
+void doit( void )
+{
+  CAudioFile fi;
+  fi.open("marked.aho");
+  fi.close();
+}
+
+int main( int argc, char * argv[] )
+{
+  cerr << coreleft() << endl;
+  doit();
+  cerr << coreleft() << endl;
+  return 0;
+}
+
+-----------------

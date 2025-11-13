@@ -1,0 +1,8 @@
+xdoc permite extraer comentarios del codigo en C.
+
+xdoc < entrada > salida
+
+Si en una linea de entrada aparece "<DOC>" todo lo que venga en las lineas
+siguientes, se vuelca a la salida, hasta que se encuentre una linea que
+contenga "</DOC>", etc etc etc.
+

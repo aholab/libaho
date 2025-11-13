@@ -1,0 +1,399 @@
+/*!
+   \file vad.cpp
+   \brief Estimación de actividad vocal
+
+	Copyright: 2010 - Grupo de Voz (DAET) ETSII/IT-Bilbao
+	\author Iker Luengo
+	\version 1.0.0
+	\date 04/03/10
+
+	\if SKIP
+	Version  dd/mm/aa  Autor     Proposito de la edicion
+	-------  --------  --------  -----------------------
+	1.0.0    04/03/10  ikerl     Codificación inicial
+	\endif
+*/
+
+
+#include "vad.h"
+#include <cassert>
+
+
+
+vad::FFTbuffer::FFTbuffer (INT Nelem, INT Nfft)
+: m_Nelem (Nelem), m_head (0), m_tail (-1)
+{ 
+	m_buffer = (DOUBLE**)xmalloc (Nelem*sizeof(DOUBLE*));
+	for (INT i = 0; i < m_Nelem; ++i)
+		m_buffer[i] = (DOUBLE*)xmalloc (Nfft*sizeof(DOUBLE));
+}
+		
+vad::FFTbuffer::~FFTbuffer()
+{
+	if (m_buffer)
+	{
+		for (INT i = 0; i < m_Nelem; ++i)
+			xfree(m_buffer[i]);
+		 xfree(m_buffer);
+	}
+}
+		
+/*!
+* Una llamada a esta función destruye todos los datos del buffer,
+* por lo que hay que llamarla con cuidado. Además, ten en cuenta
+* que destruye el buffer, pero no libera los arrays a los que apunta.
+* 
+* Sólo debería llamarse a esta función si se ha utilizado el constructor por
+* defecto (que no reserva memoria) o si se ha tenido cuidado de liberar
+* primero las memorias a las que apuntan los punteros
+*/
+void
+vad::FFTbuffer::Resize (INT Nelem, INT Nfft)
+{
+	if (m_buffer)
+	{
+		for (INT i = 0; i < m_Nelem; ++i)
+			xfree(m_buffer[i]);
+		xfree(m_buffer);
+	}
+	m_buffer = (DOUBLE**)xmalloc (Nelem*sizeof(DOUBLE*));
+	for (INT i = 0; i < Nelem; ++i)
+		m_buffer[i] = (DOUBLE*)xmalloc (Nfft*sizeof(DOUBLE));
+	
+	m_head = 0;
+	m_tail = -1;
+	m_Nelem  = Nelem;
+}
+
+
+
+
+
+
+/*!
+* Es la verdadera encargada de inicializar el objeto. Una llamada a
+* esta función resetea completamente el objeto, es decir, se pierden los buffers
+* internos, la memoria, el modelado del ruido... y nos deja un objeto
+* como recién construido, en blanco, listo para usar.
+* 
+* Es muy útil en dos casos:
+* 	- Si se ha utilizado el constructor por defecto, permite inicializar el
+* 		objeto antes de usarlo. En caso contrario, el objeto no está listo
+* 		para ser utilizado.
+* 
+* 	- Si se quiere re-utilizar el mismo objeto para aplicar el VAD en otra señal,
+* 		permite borrar toda la memoria y empezar de cero.
+* 
+* Además, una llamada a esta función es la única forma de cambiar el tamaño de la ventana
+* de trama y el tamaño de la ventana LTSE. Esto es así porque estos dos valores están
+* fuertemente relacionados con los buffers internos y la memoria FFT, y en caso de cambiarlos,
+* el historial de FFT sería totalmente inutil, dejando el objeto en un estado incoherente.
+* 
+* El resto de los parámetros puede modificarse mediante la función get apropiada.
+ * 
+ * \return false si ha habido errores en el reseteo
+ * \return true si todo ha ido bien
+*/
+bool
+vad::Reset (const vad_config & cfg, DOUBLE snr, FLOAT FrameLen, XFFT_WIN WinType)
+{ 
+	//Comprobamos un par de cosas
+	assert ((m_LTWindowLen-1)%2 == 0);	//Ventana de tamaño impar
+	assert ((m_LTWindowLen-1/2) >= m_ActWindowLen);	//Ventana de actualización menor que media LTSE
+	
+	//Debemos destruir lo que ya esté construido
+	Destruct ();
+	
+	//Primero las fáciles:
+	m_FrameLen = FrameLen;
+	m_WinType = WinType;
+	m_SNR = snr;	//La SNR inicial se debe poner a huevo
+	
+	m_SNR0 = cfg.SNR0;
+	m_SNR1 = cfg.SNR1;
+	m_gamma0 = cfg.gamma0;
+	m_gamma1 = cfg.gamma1;
+	
+	m_ActWindowLen = cfg.ActWindowLen;
+	m_LTWindowLen = cfg.LTWindowLen;
+	m_Handover = cfg.Handover;
+	m_offset = cfg.offset;
+	m_Nalfa = cfg.Nalfa;
+	m_SNRalfa = cfg.SNRalfa;
+	
+	//Ahora, los que requieren inicialización
+	m_NumSil = 0;
+	m_NumVoice = 0;
+	m_HoSil = 0;
+	m_NoisePow = 0;
+	m_SignalPow = 0;
+	m_NoiseInitFrames = 0;
+	m_bufferedFrames = 0;
+	
+	//Por último, los elementos que requieren memoria
+	m_fftObject = rfft_construct (FrameLen, FrameLen, FFT_DIRECT, 1, WinType, NULL);
+	m_Nfft = rfft_getfftnp(m_fftObject)/2;	//Tomamos el verdadero valor de Nfft (entre 2 por ser simétrica)
+	
+	m_NoiseFFT = (pDOUBLE) xmalloc (m_Nfft*sizeof(DOUBLE));
+	m_NoiseFFTAct = (pDOUBLE) xmalloc (m_Nfft*sizeof(DOUBLE));
+	m_LTSE = (pDOUBLE) xmalloc (m_Nfft*sizeof(DOUBLE));
+	
+	m_memFFT.Resize(m_LTWindowLen, m_Nfft);
+	//Es importante inicializar el buffer para que luego al calcular la LTSE
+	//de las primeras tramas del archivo, no haya problemas porque no existen
+	//tramas anteriores.
+	for (INT i = 0; i < m_LTWindowLen; ++i)
+	{
+		for (INT j = 0; j < m_Nfft; ++j)
+			m_memFFT[i][j] = 0;
+	}
+	
+	//Comprobamos que no haya errores
+	if (   m_fftObject == NULL
+		|| m_NoiseFFT == NULL
+		|| m_NoiseFFTAct == NULL
+		|| m_LTSE == NULL)
+	{
+		Destruct ();
+		return false;
+	}
+	
+	//Inicializamos las memorias
+	memset (m_NoiseFFT, 0, m_Nfft*sizeof(DOUBLE));
+	memset (m_NoiseFFTAct, 0, m_Nfft*sizeof(DOUBLE));
+	memset (m_LTSE, 0, m_Nfft*sizeof(DOUBLE));
+	
+	return true;
+}
+
+/*!
+* La trama que se le pasa a esta función se utiliza para la inicialización del ruido.
+* Antes de utilizar el objeto, es necesario llamar a esta función varias veces
+* con tramas de ruido, para que el sistema pueda estimar el espectro medio de ruido.
+* Se recomienda llamar a esta función con unas 15 tramas diferentes antes de usar el objeto.
+* 
+* \note IMPORTANTE: La inicialización del ruido debe hacerse antes de usar el objeto. Una vez
+* que ya se ha realizado esta inicialización, NO DEBE LLAMARSE DE NUEVO. Cuando el sistema
+* ya se encuentra procesando la señal, automáticamente se van actualizando las características
+* del ruido. Llamar a esta funciónotra vez provocaría perder este comportamiento adaptativo.
+* No ocurrirían errores de ejecución, pero el comportamiento del VAD no será el esperado.
+*/
+void
+vad::NoiseInit (pDOUBLE frame)
+{
+	//Calculamos la FFT de la nueva trama
+	rfft_rfft (m_fftObject, frame);
+	rfft_mag (m_fftObject);
+	pDOUBLE newFFT = rfft_getrevec (m_fftObject);
+	
+	//Actualizamos el espectro de ruido.
+	//Hay que des-normalizar, sumar y re-normalizar,
+	//todo ello en un único paso
+	DOUBLE rescale = DOUBLE(m_NoiseInitFrames)/DOUBLE(m_NoiseInitFrames+1);
+	if (m_NoiseInitFrames != 0)
+		for (INT i = 0; i < m_Nfft; ++i)
+			m_NoiseFFT[i] = m_NoiseFFT[i]*rescale + newFFT[i]/(m_NoiseInitFrames+1);
+	else
+		for (INT i = 0; i < m_Nfft; ++i)
+			m_NoiseFFT[i] = newFFT[i];
+	
+	//Actualizamos la potencia de ruido
+	for (INT i = 0; i < m_Nfft; ++i)
+		m_NoisePow += m_NoiseFFT[i]*m_NoiseFFT[i];
+	m_NoisePow /= m_Nfft;
+	
+	//Actualizamos la potencia de señal
+	//(se supone que lo que conocemos es la SNR)
+	m_SignalPow = pow(10,m_SNR/10) * m_NoisePow;
+
+	++m_NoiseInitFrames;	//Ahora hay una trama más
+}
+	
+/*!
+* Las primeras (LTWindowLen-1)/2 veces que se llame
+* a esta función, el buffer de la ventana LTSE todavía no
+* estará lleno hasta la mitad, por lo que no se puede calcular
+* el VAD (se estaría calculando el VAD de una trama
+* de índice negativo). En estos casos devuelve silencio.
+* 
+* Es cosa del programador tener esto en cuenta (al igual que lo
+* es tener en cuenta que el VAD que se devuelve es el de
+* la trama que se pasa -(LTWindowLen-1)/2).
+* 
+* \return true si la trama contiene voz
+* \return false si la trama es silencio
+* 
+* \note REPITO: El valor devuelvo por la función NO ES EL VAD
+* 		de la trama que se le pasa como parámetro, sino el de
+* 		la trama central de la ventana LTSE. Es decir, el
+* 		de las trama que se pasó (LTWindowLen-1)/2) llamadas
+* 		anteriores.
+*/
+bool
+vad::doVAD (pDOUBLE frame)
+{
+	//Añadimos la trama al buffer
+	AddToBuffer (frame);
+	
+	//Si no se ha llegado a llenar medio buffer,
+	//no hagas nada y devuelve silencio. Todavía no
+	//se puede calcular nada. Sólo puedes añadir la trama
+	//al buffer, cosa que ya has hecho
+	if (m_bufferedFrames < (m_LTWindowLen-1)/2)
+	{
+		++m_bufferedFrames;
+		return false;
+	}
+	
+	//Calculamos la LTSE
+	LTSE();
+	
+	//Calculamos LTSD a partir de LTSE
+	DOUBLE ltsd = LTSD();
+	
+	//Calculamos el umbral que corresponde a la actual SNR
+	DOUBLE gamma = Gamma();
+
+	//Ahora comparamos con el umbral para detectar voz
+	if (ltsd+m_offset >= gamma)
+	{
+		ActualizeSignal();
+		return true;
+	}
+	else if (m_HoSil < m_Handover)
+	{
+		++m_HoSil; //Parece silencio pero el HandOver está activado
+		return true;
+	}
+	else
+	{
+		ActualizeNoise();
+		return false;
+	}
+}
+		
+		
+		
+/*!
+ * Toda la funcionalidad del destructor está pasada a esta función
+ */
+void
+vad::Destruct()
+{
+	if (m_NoiseFFT) xfree(m_NoiseFFT);
+	if (m_NoiseFFTAct) xfree(m_NoiseFFTAct);
+	if (m_LTSE) xfree(m_LTSE);
+	if (m_fftObject) rfft_destruct(m_fftObject);
+}
+
+
+DOUBLE
+vad::Gamma() const
+{
+	if (m_SNR <= m_SNR0)
+		return m_gamma0;
+	else if (m_SNR >= m_SNR1)
+		return m_gamma1;
+	else
+		return ((m_gamma0-m_gamma1)/(m_SNR0-m_SNR1)*m_SNR + m_gamma0 - (m_gamma0-m_gamma1)/(1-m_SNR1/m_SNR0));
+}
+
+void
+vad::ActualizeSignal()
+{
+	INT M = (m_NumVoice < m_ActWindowLen) ? m_NumVoice : m_ActWindowLen;
+	DOUBLE SignalPAct = 0;
+	
+	for (int i = (m_LTWindowLen-1)/2-M+1; i <= (m_LTWindowLen-1)/2+1 ; ++i)
+	{
+		for (INT j = 0; j < m_Nfft; ++j)
+			SignalPAct += m_memFFT[i][j]*m_memFFT[i][j];
+	}
+	SignalPAct /= ((M+1)*m_Nfft);
+	m_SignalPow = m_SNRalfa*m_SignalPow + (1-m_SNRalfa)*SignalPAct;
+	
+	//Conocida la potencia de la señal, se saca la SNR
+	m_SNR = 10*log10(m_SignalPow/m_NoisePow);
+	
+	//Actualizamos los contadores
+	++m_NumVoice;
+	m_NumSil = 0;
+	m_HoSil = 0;
+}
+
+void
+vad::ActualizeNoise()
+{
+	//Borramos los valores anteriores
+	memset (m_NoiseFFTAct, 0, m_Nfft*sizeof(DOUBLE));
+
+	INT M = (m_NumSil < m_ActWindowLen) ? m_NumSil : m_ActWindowLen;
+	DOUBLE NoisePAct = 0;
+	
+	for (INT i = (m_LTWindowLen-1)/2-M+1; i <= (m_LTWindowLen-1)/2+1 ; ++i)
+	{
+		for (INT j = 0; j < m_Nfft; ++j)
+		{
+			NoisePAct += m_memFFT[i][j]*m_memFFT[i][j];
+			m_NoiseFFTAct[j] += m_memFFT[i][j];
+		}
+	}
+
+	//Normalizamos y ponderamos con los anteriores
+	NoisePAct /= ((M+1)*m_Nfft);
+	for (INT i = 0; i < m_Nfft; ++i)
+		m_NoiseFFT[i] = m_Nalfa*m_NoiseFFT[i] + (1-m_Nalfa)*m_NoiseFFTAct[i]/(M+1);
+
+	m_NoisePow = m_Nalfa*m_NoisePow + (1-m_Nalfa)*NoisePAct;
+
+	//Conocida la potencia de ruido, se saca la SNR
+	m_SNR = 10*log10(m_SignalPow/m_NoisePow);
+
+	//Actualizamod los contadores
+	++m_NumSil;
+	m_NumVoice = 0;
+}
+
+void
+vad::AddToBuffer (pDOUBLE frame)
+{
+	//Calculamos la FFT de la nueva trama
+	rfft_rfft (m_fftObject, frame);
+	rfft_mag (m_fftObject);
+	pDOUBLE newFFT = rfft_getrevec (m_fftObject);
+	
+	//La añadimos al buffer
+	m_memFFT.Advance();
+	for (INT i = 0; i < m_Nfft; ++i)
+		m_memFFT.Tail()[i] = newFFT[i];
+
+}
+
+void
+vad::LTSE ()
+{
+	//Borramos el LTSE anterior
+	memset (m_LTSE, 0, m_Nfft*sizeof(DOUBLE));
+	
+	//Y calculamos el nuevo
+	for (INT i = 0; i < m_LTWindowLen; ++i)
+	{
+		for (INT j = 0; j < m_Nfft; ++j)
+			if (m_memFFT[i][j] > m_LTSE[j])
+				m_LTSE[j] = m_memFFT[i][j];
+	}
+	//Aunque para las primeras tramas no existan las (LTWindowLen-1)/2 tramas anteriores,
+	//si se ha inicializado el buffer de memFFT a cero esto no afecta al cálculo
+	//del máximo, y es como si sólo se usaran las tramas posteriores.
+}
+
+DOUBLE
+vad::LTSD () const
+{
+	DOUBLE sal = 0;
+	for (INT i = 0; i < m_Nfft; ++i)
+		sal += (m_LTSE[i]*m_LTSE[i]) / (m_NoiseFFT[i]*m_NoiseFFT[i]);
+	sal = 10*log10(sal/m_Nfft);
+	return sal;
+}
+

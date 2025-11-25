@@ -18,7 +18,8 @@
 #include "stat.h"
 #include "tdef.h"
 #include "uti.h"
-#ifndef __OS_WINDOWS__
+#define __USE_GRAPHICS__ISC_NO
+#if defined(__OS_WINDOWS__) && defined (__USE_GRAPHICS__)
 #include "graph.h"
 #include "vplot.h"
 #endif
